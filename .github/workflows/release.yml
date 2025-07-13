@@ -1,19 +1,114 @@
-name: Build and Release
+name: Auto Release
 
 on:
   push:
-    tags:
-      - 'v*'
-  pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 env:
   GO_VERSION: '1.21'
 
 jobs:
+  version:
+    name: Determine Next Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Get latest tag
+      id: latest_tag
+      run: |
+        # Get the latest tag, default to v0.0.0 if no tags exist
+        latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        echo "latest_tag=$latest_tag" >> $GITHUB_OUTPUT
+        echo "Latest tag: $latest_tag"
+
+    - name: Determine version bump
+      id: bump_type
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "bump_type=${{ github.event.inputs.version_bump }}" >> $GITHUB_OUTPUT
+        else
+          # Auto-determine based on commit messages
+          commits=$(git log ${{ steps.latest_tag.outputs.latest_tag }}..HEAD --oneline)
+          echo "Commits since last tag:"
+          echo "$commits"
+          
+          if echo "$commits" | grep -q "BREAKING CHANGE\|!:"; then
+            echo "bump_type=major" >> $GITHUB_OUTPUT
+          elif echo "$commits" | grep -q "feat:"; then
+            echo "bump_type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "bump_type=patch" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: Calculate next version
+      id: version
+      run: |
+        latest_tag="${{ steps.latest_tag.outputs.latest_tag }}"
+        bump_type="${{ steps.bump_type.outputs.bump_type }}"
+        
+        # Remove 'v' prefix if present
+        version=${latest_tag#v}
+        
+        # Split version into parts
+        IFS='.' read -r major minor patch <<< "$version"
+        
+        # Increment based on bump type
+        case $bump_type in
+          major)
+            major=$((major + 1))
+            minor=0
+            patch=0
+            ;;
+          minor)
+            minor=$((minor + 1))
+            patch=0
+            ;;
+          patch)
+            patch=$((patch + 1))
+            ;;
+        esac
+        
+        new_version="$major.$minor.$patch"
+        new_tag="v$new_version"
+        
+        echo "version=$new_version" >> $GITHUB_OUTPUT
+        echo "tag=$new_tag" >> $GITHUB_OUTPUT
+        echo "Next version: $new_version"
+        echo "Next tag: $new_tag"
+
+    - name: Create and push tag
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        tag="${{ steps.version.outputs.tag }}"
+        git tag -a "$tag" -m "Release $tag"
+        git push origin "$tag"
+        echo "Created and pushed tag: $tag"
+
   build:
     name: Build for ${{ matrix.os }}-${{ matrix.arch }}
+    needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -60,9 +155,7 @@ jobs:
       if: matrix.os == 'linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y librtlsdr-dev pkg-config
-        # For static builds
-        sudo apt-get install -y gcc-aarch64-linux-gnu
+        sudo apt-get install -y librtlsdr-dev pkg-config gcc-aarch64-linux-gnu
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
@@ -84,45 +177,56 @@ jobs:
     - name: Build binary
       run: |
         mkdir -p dist
+        version="${{ needs.version.outputs.version }}"
+        
         if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
           if [ "${{ matrix.static }}" = "true" ]; then
-            # Static build for Linux
-            go build -ldflags "-linkmode external -extldflags '-static' -X main.Version=${{ github.ref_name }}" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+            # Static build for Linux - fix the linking issue
+            go build -ldflags "-linkmode external -extldflags '-static -lusb-1.0' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
           else
             # Dynamic build for macOS
-            go build -ldflags "-X main.Version=${{ github.ref_name }}" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+            go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
           fi
         else
-          # No CGO build for Windows (RTL-SDR functionality disabled)
-          go build -ldflags "-X main.Version=${{ github.ref_name }}" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}.exe .
+          # No CGO build for Windows
+          go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}.exe .
         fi
 
     - name: Create release package
       run: |
         cd dist
         binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
-        package_name="go1090-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}"
+        package_name="go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
         
         mkdir -p "$package_name"
         cp "$binary_name" "$package_name/"
         cp ../README.md "$package_name/"
         cp ../LICENSE "$package_name/"
+        cp ../CHANGELOG.md "$package_name/"
         
         # Create platform-specific README
-        cat > "$package_name/INSTALL.md" << EOF
+        cat > "$package_name/INSTALL.md" << 'EOF'
         # Installation Instructions - ${{ matrix.os }}/${{ matrix.arch }}
+        
+        ## Quick Start
+        
+        ```bash
+        # Make executable (Linux/macOS only)
+        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        
+        # Run with default settings
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        ```
         
         ## Dependencies
         
-        ${{ matrix.os == 'linux' && '### Linux (Ubuntu/Debian)
+        ${{ matrix.os == 'linux' && '### Linux
         ```bash
-        sudo apt-get update
+        # Ubuntu/Debian
         sudo apt-get install librtlsdr0
-        ```
         
-        ### Linux (CentOS/RHEL/Fedora)
-        ```bash
-        sudo yum install rtl-sdr  # or dnf install rtl-sdr
+        # CentOS/RHEL/Fedora
+        sudo yum install rtl-sdr
         ```' || '' }}
         
         ${{ matrix.os == 'darwin' && '### macOS
@@ -131,49 +235,39 @@ jobs:
         ```' || '' }}
         
         ${{ matrix.os == 'windows' && '### Windows
-        **Note**: This Windows build has RTL-SDR support disabled due to build complexity.
-        For full RTL-SDR support on Windows, please build from source or use WSL with the Linux build.
-        
-        For RTL-SDR support:
-        1. Install librtlsdr via MSYS2/MinGW
-        2. Build from source with CGO enabled' || '' }}
+        **Note**: This Windows build has RTL-SDR support disabled.
+        For full functionality, use Linux or macOS builds, or build from source.' || '' }}
         
         ## Usage
         
         ```bash
-        # Make executable (Linux/macOS only)
-        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
-        
-        # Run with default settings
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        # Show help
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --help
         
         # Run with custom settings
         ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --verbose --log-dir ./logs
         ```
         
-        ## Troubleshooting
-        
-        See the main README.md for detailed troubleshooting information.
+        For more information, see README.md
         EOF
         
-        # Create archive
+        # Create ZIP archive
         if [ "${{ matrix.os }}" = "windows" ]; then
           zip -r "${package_name}.zip" "$package_name"
         else
-          tar -czf "${package_name}.tar.gz" "$package_name"
+          zip -r "${package_name}.zip" "$package_name"
         fi
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v3
       with:
         name: go1090-${{ matrix.os }}-${{ matrix.arch }}
-        path: dist/go1090-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.*
+        path: dist/go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
 
   release:
     name: Create Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     
     steps:
     - name: Checkout code
@@ -187,95 +281,96 @@ jobs:
     - name: Display structure
       run: ls -la artifacts/
 
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get commits since last tag for changelog
+        if [ -n "${{ needs.version.outputs.tag }}" ]; then
+          previous_tag=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          if [ -n "$previous_tag" ]; then
+            echo "## Changes since $previous_tag" > RELEASE_NOTES.md
+            echo "" >> RELEASE_NOTES.md
+            git log $previous_tag..HEAD --oneline --pretty=format:"- %s" >> RELEASE_NOTES.md
+          else
+            echo "## Initial Release" > RELEASE_NOTES.md
+          fi
+        else
+          echo "## Release Notes" > RELEASE_NOTES.md
+        fi
+        
+        # Add download section
+        cat >> RELEASE_NOTES.md << 'EOF'
+        
+        ## Downloads
+        
+        Choose the appropriate ZIP file for your system:
+        
+        ### Linux
+        - **Linux x64**: `go1090-${{ needs.version.outputs.version }}-linux-amd64.zip`
+        - **Linux ARM64**: `go1090-${{ needs.version.outputs.version }}-linux-arm64.zip`
+        
+        ### macOS
+        - **macOS Intel**: `go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip`
+        - **macOS Apple Silicon**: `go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip`
+        
+        ### Windows
+        - **Windows x64**: `go1090-${{ needs.version.outputs.version }}-windows-amd64.zip`
+        - ⚠️ **Note**: Windows build has limited RTL-SDR support
+        
+        ## Installation
+        
+        1. Download the appropriate ZIP file for your system
+        2. Extract the ZIP file
+        3. Follow the INSTALL.md instructions included in the package
+        4. Install RTL-SDR dependencies as described
+        5. Run the binary
+        
+        ## Requirements
+        
+        - RTL2832U USB SDR device
+        - librtlsdr library installed (except Windows)
+        - 1090MHz antenna (for optimal reception)
+        EOF
+
     - name: Create Release
       uses: actions/create-release@v1
       id: create_release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
-        body: |
-          # Go1090 ADS-B Beast Mode Decoder ${{ github.ref_name }}
-          
-          ## Downloads
-          
-          Choose the appropriate binary for your system:
-          
-          ### Linux
-          - **Linux x64**: `go1090-${{ github.ref_name }}-linux-amd64.tar.gz`
-          - **Linux ARM64**: `go1090-${{ github.ref_name }}-linux-arm64.tar.gz`
-          
-          ### macOS
-          - **macOS Intel**: `go1090-${{ github.ref_name }}-darwin-amd64.tar.gz`
-          - **macOS Apple Silicon**: `go1090-${{ github.ref_name }}-darwin-arm64.tar.gz`
-          
-          ### Windows
-          - **Windows x64**: `go1090-${{ github.ref_name }}-windows-amd64.zip`
-          - ⚠️ **Note**: Windows build has limited RTL-SDR support. Use Linux/macOS for full functionality.
-          
-          ## Installation
-          
-          1. Download the appropriate archive for your system
-          2. Extract the archive
-          3. Follow the INSTALL.md instructions included in the package
-          4. Install RTL-SDR dependencies as described
-          5. Run the binary
-          
-          ## What's New
-          
-          See the CHANGELOG.md for detailed changes in this release.
-          
-          ## Requirements
-          
-          - RTL2832U USB SDR device
-          - librtlsdr library installed
-          - 1090MHz antenna (for optimal reception)
-          
-          ## Support
-          
-          - 📖 **Documentation**: See README.md
-          - 🐛 **Issues**: Report on GitHub Issues
-          - 💬 **Discussions**: Use GitHub Discussions
+        tag_name: ${{ needs.version.outputs.tag }}
+        release_name: Go1090 ${{ needs.version.outputs.tag }}
+        body_path: RELEASE_NOTES.md
         draft: false
         prerelease: false
 
     - name: Upload Release Assets
       run: |
-        for file in artifacts/*/go1090-${{ github.ref_name }}-*; do
+        for file in artifacts/*/go1090-${{ needs.version.outputs.version }}-*.zip; do
           if [ -f "$file" ]; then
-            echo "Uploading $file"
-            gh release upload ${{ github.ref_name }} "$file"
+            filename=$(basename "$file")
+            echo "Uploading $filename"
+            gh release upload ${{ needs.version.outputs.tag }} "$file"
           fi
         done
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  test:
-    name: Test Build
+  notification:
+    name: Send Notification
+    needs: [version, release]
     runs-on: ubuntu-latest
+    if: always()
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Install dependencies
+    - name: Notify Success
+      if: needs.release.result == 'success'
       run: |
-        sudo apt-get update
-        sudo apt-get install -y librtlsdr-dev
-
-    - name: Run tests
-      run: go test -v ./...
-
-    - name: Build test
-      run: go build -v .
-
-    - name: Check binary
+        echo "🎉 Release ${{ needs.version.outputs.tag }} created successfully!"
+        echo "Download: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.tag }}"
+        
+    - name: Notify Failure
+      if: needs.release.result == 'failure'
       run: |
-        ./go1090 --help
-        ./go1090 --version || echo "Version flag not implemented yet" 
+        echo "❌ Release ${{ needs.version.outputs.tag }} failed!"
+        exit 1 

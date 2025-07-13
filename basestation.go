@@ -77,6 +77,10 @@ func NewBaseStationWriter(logRotator *LogRotator, logger *logrus.Logger) *BaseSt
 
 // WriteMessage writes a Beast message in BaseStation format
 func (w *BaseStationWriter) WriteMessage(msg *BeastMessage) error {
+	if msg == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+
 	if !msg.IsValid() {
 		return fmt.Errorf("invalid message")
 	}
