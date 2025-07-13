@@ -8,6 +8,10 @@ on:
       - 'docs/**'
       - '.github/**'
 
+permissions:
+  contents: write
+  pull-requests: read
+
 env:
   GO_VERSION: '1.21'
 
@@ -64,7 +68,9 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
-        git push origin "${{ steps.version.outputs.tag }}"
+        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "${{ steps.version.outputs.tag }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Build releases
       run: |
