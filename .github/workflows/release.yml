@@ -2,7 +2,7 @@ name: Auto Release
 
 on:
   push:
-    branches: [ "**" ]  # Changed from [ main ] to work on any branch
+    branches: [ "**" ]  # Build and test on any branch
   workflow_dispatch:
     inputs:
       version_bump:
@@ -14,6 +14,11 @@ on:
           - patch
           - minor
           - major
+      create_release:
+        description: 'Create actual release (only works on main branch)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -26,6 +31,8 @@ jobs:
   version:
     name: Determine Next Version
     runs-on: ubuntu-latest
+    # Only run version/tagging on main branch or when explicitly requested
+    if: github.ref == 'refs/heads/main' || github.event.inputs.create_release == 'true'
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -114,7 +121,9 @@ jobs:
 
   build:
     name: Build for ${{ matrix.os }}-${{ matrix.arch }}
-    needs: version
+    needs: [version]
+    # Always run build for testing, but version job may be skipped
+    if: always()
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -186,9 +195,16 @@ jobs:
     - name: Build binary
       run: |
         mkdir -p dist
-        version="${{ needs.version.outputs.version }}"
         
-        # Debug: Print build environment
+        # Use version from version job if available, otherwise use test version
+        if [ "${{ needs.version.outputs.version }}" != "" ]; then
+          version="${{ needs.version.outputs.version }}"
+        else
+          # Test version for non-main branches
+          version="test-$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
+        fi
+        
+        echo "Building version: $version"
         echo "Building for GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
         go env
         
@@ -209,7 +225,15 @@ jobs:
       run: |
         cd dist
         binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
-        package_name="go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
+        
+        # Use version from version job if available, otherwise use test version
+        if [ "${{ needs.version.outputs.version }}" != "" ]; then
+          package_version="${{ needs.version.outputs.version }}"
+        else
+          package_version="test-$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
+        fi
+        
+        package_name="go1090-${package_version}-${{ matrix.os }}-${{ matrix.arch }}"
         
         mkdir -p "$package_name"
         cp "$binary_name" "$package_name/"
@@ -275,12 +299,14 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: go1090-${{ matrix.os }}-${{ matrix.arch }}
-        path: dist/go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
+        path: dist/go1090-*-${{ matrix.os }}-${{ matrix.arch }}.zip
 
   release:
     name: Create Release
     needs: [version, build]
     runs-on: ubuntu-latest
+    # Only create releases on main branch or when explicitly requested
+    if: (github.ref == 'refs/heads/main' || github.event.inputs.create_release == 'true') && needs.version.result == 'success'
     
     steps:
     - name: Checkout code
@@ -312,22 +338,22 @@ jobs:
         fi
         
         # Add download section
-        cat >> RELEASE_NOTES.md << 'EOF'
+        cat >> RELEASE_NOTES.md << EOF
         
         ## Downloads
         
         Choose the appropriate ZIP file for your system:
         
         ### Linux
-        - **Linux x64**: `go1090-${{ needs.version.outputs.version }}-linux-amd64.zip`
-        - **Linux ARM64**: `go1090-${{ needs.version.outputs.version }}-linux-arm64.zip`
+        - **Linux x64**: \`go1090-${{ needs.version.outputs.version }}-linux-amd64.zip\`
+        - **Linux ARM64**: \`go1090-${{ needs.version.outputs.version }}-linux-arm64.zip\`
         
         ### macOS
-        - **macOS Intel**: `go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip`
-        - **macOS Apple Silicon**: `go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip`
+        - **macOS Intel**: \`go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip\`
+        - **macOS Apple Silicon**: \`go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip\`
         
         ### Windows
-        - **Windows x64**: `go1090-${{ needs.version.outputs.version }}-windows-amd64.zip`
+        - **Windows x64**: \`go1090-${{ needs.version.outputs.version }}-windows-amd64.zip\`
         - ⚠️ **Note**: Windows build has limited RTL-SDR support
         
         ## Installation
@@ -354,15 +380,58 @@ jobs:
         draft: false
         prerelease: false
         files: |
-          artifacts/*/go1090-${{ needs.version.outputs.version }}-*.zip
+          artifacts/*/go1090-*-*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  notification:
-    name: Send Notification
-    needs: [version, release]
+  test-summary:
+    name: Test Summary
+    needs: [version, build]
     runs-on: ubuntu-latest
     if: always()
+    
+    steps:
+    - name: Test Build Summary
+      run: |
+        echo "## 🧪 Pipeline Test Summary"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+        echo ""
+        
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          echo "✅ Running on main branch - releases will be created"
+        else
+          echo "🔄 Running on feature branch - testing only (no releases)"
+        fi
+        
+        echo ""
+        echo "### Build Status:"
+        if [ "${{ needs.build.result }}" = "success" ]; then
+          echo "✅ All builds completed successfully"
+        else
+          echo "❌ Some builds failed"
+        fi
+        
+        echo ""
+        echo "### Version Status:"
+        if [ "${{ needs.version.result }}" = "success" ]; then
+          echo "✅ Version determined: ${{ needs.version.outputs.version }}"
+        elif [ "${{ needs.version.result }}" = "skipped" ]; then
+          echo "⏭️  Version job skipped (not on main branch)"
+        else
+          echo "❌ Version job failed"
+        fi
+        
+        echo ""
+        echo "To create an actual release:"
+        echo "1. Push to main branch, OR"
+        echo "2. Manually trigger with 'create_release' = true"
+
+  notification:
+    name: Release Notification
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    if: always() && needs.release.result != 'skipped'
     
     steps:
     - name: Notify Success
