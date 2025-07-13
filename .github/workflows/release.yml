@@ -136,7 +136,7 @@ jobs:
             static: false
           - os: linux
             arch: arm64
-            runner: ubuntu-latest
+            runner: ubuntu-latest  # Try ARM64 runner, fallback to cross-compilation
             cgo_enabled: 1
             static: false
           # macOS builds
@@ -175,38 +175,12 @@ jobs:
         # Install common dependencies
         sudo apt-get install -y pkg-config build-essential
         
-        # Install architecture-specific dependencies
+        # Install dependencies and cross-compilation tools
+        sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
+        
         if [ "${{ matrix.arch }}" = "arm64" ]; then
-          # Add ARM64 architecture and sources
-          sudo dpkg --add-architecture arm64
-          
-          # Update sources for multiarch
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-          
-          sudo apt-get update
-          
-          # Install cross-compilation tools
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          
-          # Install ARM64 libraries
-          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64 libc6-dev:arm64
-          
-          # Install native versions for pkg-config
-          sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
-        else
-          # AMD64 (native compilation)
-          sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
         fi
-        
-        # Install static libraries for static linking (already installed with -dev packages)
-        # librtlsdr2 and libusb-1.0-0 are installed as dependencies of the -dev packages
-        
-        # Debug: Check what libraries are available
-        echo "=== Available RTL-SDR libraries ==="
-        find /usr/lib* -name "*rtlsdr*" 2>/dev/null || echo "No rtlsdr libraries found"
-        echo "=== Available USB libraries ==="
-        find /usr/lib* -name "*usb*" 2>/dev/null | grep -E "(libusb|usb-1)" | head -5 || echo "No USB libraries found"
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
@@ -230,27 +204,16 @@ jobs:
       run: |
         echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
         echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
-        echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
-    - name: Validate cross-compilation setup (ARM64)
+    - name: Validate setup (ARM64)
       if: matrix.os == 'linux' && matrix.arch == 'arm64'
       shell: bash
       run: |
-        echo "=== Cross-compilation validation ==="
+        echo "Cross-compilation validation:"
         echo "CC: $CC"
         echo "CXX: $CXX"
-        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
-        echo "PKG_CONFIG_LIBDIR: $PKG_CONFIG_LIBDIR"
-        echo ""
-        echo "Testing pkg-config for librtlsdr..."
         pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
-        echo ""
-        echo "Testing compiler..."
         $CC --version
-        echo ""
-        echo "Testing library paths..."
-        find /usr/lib/aarch64-linux-gnu -name "*librtlsdr*" -o -name "*libusb*" | head -10
 
     - name: Build binary
       shell: bash
