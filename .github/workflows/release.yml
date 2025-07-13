@@ -179,17 +179,41 @@ jobs:
           # Add ARM64 architecture
           sudo dpkg --add-architecture arm64
           
-          # Configure repositories for ARM64 - modify sources.list to specify architectures
+          # Create a completely new sources.list that excludes ARM64 from all existing repositories
           sudo cp /etc/apt/sources.list /etc/apt/sources.list.backup
           
-          # Modify main sources.list to only fetch amd64 packages from main repositories
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
-          sudo sed -i 's/^deb-src /deb-src [arch=amd64] /' /etc/apt/sources.list
+          # Completely rewrite sources.list to exclude ARM64 from ALL repositories
+          sudo rm -f /etc/apt/sources.list
+          echo "# Main Ubuntu repositories - AMD64 only" | sudo tee /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble main restricted" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble-updates main restricted" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble universe" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble-updates universe" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble-updates multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main restricted" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security universe" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security multiverse" | sudo tee -a /etc/apt/sources.list
           
-          # Add ports repository for ARM64 packages
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-security main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          # Create ARM64-specific repositories using Ubuntu Ports
+          echo "# Ubuntu Ports for ARM64 packages" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          
+          # Also ensure Microsoft repositories don't try to fetch ARM64 packages
+          sudo find /etc/apt/sources.list.d/ -name "*.list" ! -name "arm64.list" -exec sudo sed -i 's/^deb /deb [arch=amd64] /' {} \; 2>/dev/null || true
+          
+          # Clean up any existing ARM64 package lists to avoid conflicts
+          sudo rm -f /var/lib/apt/lists/*arm64*
           
           # Update package lists
           sudo apt-get update
