@@ -173,18 +173,27 @@ jobs:
         sudo apt-get update
         
         # Install common dependencies
-        sudo apt-get install -y pkg-config
+        sudo apt-get install -y pkg-config build-essential
         
         # Install architecture-specific dependencies
         if [ "${{ matrix.arch }}" = "arm64" ]; then
-          # Add ARM64 architecture and install cross-compilation tools
+          # Add ARM64 architecture and sources
           sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64
           
-          # Install additional libraries needed for static linking on ARM64
-          sudo apt-get install -y libc6-dev:arm64
+          # Update sources for multiarch
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          
+          sudo apt-get update
+          
+          # Install cross-compilation tools
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          
+          # Install ARM64 libraries
+          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64 libc6-dev:arm64
+          
+          # Install native versions for pkg-config
+          sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
         else
           # AMD64 (native compilation)
           sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
@@ -211,7 +220,28 @@ jobs:
       shell: bash
       run: |
         echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+        echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+        echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+
+    - name: Validate cross-compilation setup (ARM64)
+      if: matrix.os == 'linux' && matrix.arch == 'arm64'
+      shell: bash
+      run: |
+        echo "=== Cross-compilation validation ==="
+        echo "CC: $CC"
+        echo "CXX: $CXX"
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        echo "PKG_CONFIG_LIBDIR: $PKG_CONFIG_LIBDIR"
+        echo ""
+        echo "Testing pkg-config for librtlsdr..."
+        pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
+        echo ""
+        echo "Testing compiler..."
+        $CC --version
+        echo ""
+        echo "Testing library paths..."
+        find /usr/lib/aarch64-linux-gnu -name "*librtlsdr*" -o -name "*libusb*" | head -10
 
     - name: Build binary
       shell: bash
