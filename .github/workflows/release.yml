@@ -150,12 +150,6 @@ jobs:
             runner: macos-latest  # ARM64 runner for arm64 builds
             cgo_enabled: 1
             static: false
-          # Windows builds (CGO disabled due to complexity)
-          - os: windows
-            arch: amd64
-            runner: windows-latest
-            cgo_enabled: 0
-            static: false
 
     steps:
     - name: Checkout code
@@ -232,24 +226,19 @@ jobs:
         echo "Building for GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
         go env
         
-        if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
-          # CGO build - validate pkg-config can find libraries
-          echo "Validating CGO build environment..."
-          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
-          pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr NOT found"
-          
-          # Dynamic build (Linux/macOS)
-          go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-        else
-          # No CGO build for Windows
-          go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}.exe .
-        fi
+        # CGO build - validate pkg-config can find libraries
+        echo "Validating CGO build environment..."
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr NOT found"
+        
+        # Dynamic build (Linux/macOS)
+        go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
 
     - name: Create release package
       shell: bash
       run: |
         cd dist
-        binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
+        binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}"
         
         # Use version from version job if available, otherwise use test version
         if [ "${{ needs.version.outputs.version }}" != "" ]; then
@@ -273,11 +262,11 @@ jobs:
         ## Quick Start
         
         ```bash
-        # Make executable (Linux/macOS only)
-        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        # Make executable
+        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}
         
         # Run with default settings
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }}
         ```
         
         ## Dependencies
@@ -301,32 +290,21 @@ jobs:
         brew install librtlsdr
         ```' || '' }}
         
-        ${{ matrix.os == 'windows' && '### Windows
-        **Note**: This Windows build has RTL-SDR support disabled.
-        For full functionality, use:
-        - Linux or macOS builds
-        - Windows Subsystem for Linux (WSL)
-        - Build from source with CGO enabled' || '' }}
-        
         ## Usage
         
         ```bash
         # Show help
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --help
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }} --help
         
         # Run with custom settings
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --verbose --log-dir ./logs
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }} --verbose --log-dir ./logs
         ```
         
         For more information, see README.md
         EOF
         
         # Create ZIP archive
-        if [ "${{ matrix.os }}" = "windows" ]; then
-          zip -r "${package_name}.zip" "$package_name"
-        else
-          zip -r "${package_name}.zip" "$package_name"
-        fi
+        zip -r "${package_name}.zip" "$package_name"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -384,10 +362,6 @@ jobs:
         ### macOS
         - **macOS Intel**: \`go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip\`
         - **macOS Apple Silicon**: \`go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip\`
-        
-        ### Windows
-        - **Windows x64**: \`go1090-${{ needs.version.outputs.version }}-windows-amd64.zip\`
-        - ⚠️ **Note**: Windows build has limited RTL-SDR support
         
         ## Installation
         
