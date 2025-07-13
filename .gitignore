@@ -1,0 +1,119 @@
+# Go1090 ADS-B Beast Mode Decoder - .gitignore
+
+# Compiled Go binaries
+go1090
+go1090.exe
+go1090-*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.prof
+*.out
+coverage.txt
+coverage.html
+vendor/
+dist/
+
+# Log files and directories
+logs/
+*.log
+*.log.gz
+test_results/
+capture_test.log
+*_output.log
+
+# Test artifacts
+*.tmp
+*.temp
+test_*
+coverage/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+.emacs.d/
+.sublime-*
+
+# Environment and config files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+config.local.*
+secrets.txt
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# Runtime and cache directories
+tmp/
+temp/
+cache/
+.cache/
+
+# Development tools
+.air.toml
+.realize.yaml
+nodemon.json
+
+# Documentation build files
+docs/_build/
+site/
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Database files (if any)
+*.db
+*.sqlite
+*.sqlite3
+
+# Compiled documentation
+*.pdf
+docs/build/
+
+# Local development overrides
+docker-compose.override.yml
+.env.override
+
+# Go module proxy cache (if running locally)
+GOPROXY/
+GOSUMDB/
+
+# CGO build cache
+*.o
+*.a
+*.h.gch 
