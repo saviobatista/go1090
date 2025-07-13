@@ -15,6 +15,10 @@ on:
           - minor
           - major
 
+permissions:
+  contents: write
+  pull-requests: read
+
 env:
   GO_VERSION: '1.21'
 
@@ -103,8 +107,10 @@ jobs:
         
         tag="${{ steps.version.outputs.tag }}"
         git tag -a "$tag" -m "Release $tag"
-        git push origin "$tag"
+        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git "$tag"
         echo "Created and pushed tag: $tag"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     name: Build for ${{ matrix.os }}-${{ matrix.arch }}
