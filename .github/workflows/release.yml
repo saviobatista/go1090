@@ -136,7 +136,7 @@ jobs:
             static: false
           - os: linux
             arch: arm64
-            runner: ubuntu-latest  # Try ARM64 runner, fallback to cross-compilation
+            runner: ubuntu-latest
             cgo_enabled: 1
             static: false
           # macOS builds
@@ -173,7 +173,21 @@ jobs:
         sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
         
         if [ "${{ matrix.arch }}" = "arm64" ]; then
+          # Install cross-compilation tools
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          
+          # Add ARM64 architecture and specific ports repository
+          sudo dpkg --add-architecture arm64
+          
+          # Add only the ports repository for ARM64 packages
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          
+          # Update package lists
+          sudo apt-get update
+          
+          # Install ARM64 libraries
+          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64 || echo "Failed to install ARM64 libraries"
         fi
         
     - name: Install dependencies (macOS)
@@ -198,6 +212,11 @@ jobs:
       run: |
         echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
         echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+        
+        # Configure cross-compilation environment for ARM64 libraries
+        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+        echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+        echo "LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib" >> $GITHUB_ENV
 
     - name: Validate setup (ARM64)
       if: matrix.os == 'linux' && matrix.arch == 'arm64'
