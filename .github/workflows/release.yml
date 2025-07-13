@@ -209,11 +209,28 @@ jobs:
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           
-          # Also ensure Microsoft repositories don't try to fetch ARM64 packages
-          sudo find /etc/apt/sources.list.d/ -name "*.list" ! -name "arm64.list" -exec sudo sed -i 's/^deb /deb [arch=amd64] /' {} \; 2>/dev/null || true
+          # Check and fix Microsoft repository if needed
+          echo "Checking Microsoft repository configuration..."
+          if [ -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
+            echo "Microsoft repository content:"
+            cat /etc/apt/sources.list.d/microsoft-prod.list || echo "Failed to read Microsoft repo file"
+            # Fix any malformed entries
+            sudo sed -i 's/^deb \[arch=amd64\] \[arch=amd64\]/deb [arch=amd64]/' /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
+          fi
           
           # Clean up any existing ARM64 package lists to avoid conflicts
           sudo rm -f /var/lib/apt/lists/*arm64*
+          
+          # Validate repository configuration
+          echo "Validating repository configuration..."
+          sudo apt-get check || {
+            echo "Repository validation failed, showing detailed error..."
+            sudo apt-get update --dry-run 2>&1 | head -20
+            echo "Attempting to fix repository issues..."
+            sudo apt-get clean
+            sudo rm -rf /var/lib/apt/lists/*
+            sudo mkdir -p /var/lib/apt/lists/partial
+          }
           
           # Update package lists
           sudo apt-get update
@@ -267,6 +284,9 @@ jobs:
         echo ""
         echo "=== ARM64 sources ==="
         cat /etc/apt/sources.list.d/arm64.list || echo "No ARM64 sources file"
+        echo ""
+        echo "=== Microsoft sources ==="
+        cat /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || echo "No Microsoft sources file"
         echo ""
         echo "Package validation:"
         pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
