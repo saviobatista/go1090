@@ -128,17 +128,17 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds
+          # Linux builds (dynamic linking for reliability)
           - os: linux
             arch: amd64
             runner: ubuntu-latest
             cgo_enabled: 1
-            static: true
+            static: false
           - os: linux
             arch: arm64
             runner: ubuntu-latest
             cgo_enabled: 1
-            static: true
+            static: false
           # macOS builds
           - os: darwin
             arch: amd64
@@ -199,8 +199,14 @@ jobs:
           sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
         fi
         
-        # Install static libraries for static linking
-        sudo apt-get install -y librtlsdr0 libusb-1.0-0
+        # Install static libraries for static linking (already installed with -dev packages)
+        # librtlsdr2 and libusb-1.0-0 are installed as dependencies of the -dev packages
+        
+        # Debug: Check what libraries are available
+        echo "=== Available RTL-SDR libraries ==="
+        find /usr/lib* -name "*rtlsdr*" 2>/dev/null || echo "No rtlsdr libraries found"
+        echo "=== Available USB libraries ==="
+        find /usr/lib* -name "*usb*" 2>/dev/null | grep -E "(libusb|usb-1)" | head -5 || echo "No USB libraries found"
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
@@ -264,26 +270,13 @@ jobs:
         go env
         
         if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
-          if [ "${{ matrix.static }}" = "true" ]; then
-            # Static build for Linux - get static linking flags from pkg-config
-            echo "Getting static linking flags from pkg-config..."
-            echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
-            pkg-config --exists librtlsdr && echo "✅ librtlsdr found for static linking" || echo "❌ librtlsdr NOT found"
-            pkg-config --libs librtlsdr || echo "❌ Failed to get dynamic libs"
-            STATIC_LIBS=$(pkg-config --static --libs librtlsdr)
-            echo "Static libs: $STATIC_LIBS"
-            
-            if [ "${{ matrix.arch }}" = "arm64" ]; then
-              # ARM64 static build with cross-compilation
-              go build -ldflags "-linkmode external -extldflags '-static $STATIC_LIBS' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-            else
-              # AMD64 static build
-              go build -ldflags "-linkmode external -extldflags '-static $STATIC_LIBS' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-            fi
-          else
-            # Dynamic build for macOS and other platforms
-            go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-          fi
+          # CGO build - validate pkg-config can find libraries
+          echo "Validating CGO build environment..."
+          echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+          pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr NOT found"
+          
+          # Dynamic build (Linux/macOS)
+          go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
         else
           # No CGO build for Windows
           go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}.exe .
@@ -327,22 +320,30 @@ jobs:
         ## Dependencies
         
         ${{ matrix.os == 'linux' && '### Linux
+        **Required**: Install RTL-SDR runtime libraries
+        
         ```bash
-        # Ubuntu/Debian
-        sudo apt-get install librtlsdr0
+        # Ubuntu/Debian 
+        sudo apt-get install librtlsdr2 libusb-1.0-0
         
         # CentOS/RHEL/Fedora
-        sudo yum install rtl-sdr
+        sudo yum install rtl-sdr libusb
+        # or: sudo dnf install rtl-sdr libusb
         ```' || '' }}
         
         ${{ matrix.os == 'darwin' && '### macOS
+        **Required**: Install RTL-SDR libraries
+        
         ```bash
         brew install librtlsdr
         ```' || '' }}
         
         ${{ matrix.os == 'windows' && '### Windows
         **Note**: This Windows build has RTL-SDR support disabled.
-        For full functionality, use Linux or macOS builds, or build from source.' || '' }}
+        For full functionality, use:
+        - Linux or macOS builds
+        - Windows Subsystem for Linux (WSL)
+        - Build from source with CGO enabled' || '' }}
         
         ## Usage
         
