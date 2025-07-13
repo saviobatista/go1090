@@ -133,12 +133,12 @@ jobs:
           # macOS builds
           - os: darwin
             arch: amd64
-            runner: macos-latest
+            runner: macos-13  # Intel runner for x86_64 builds
             cgo_enabled: 1
             static: false
           - os: darwin
             arch: arm64
-            runner: macos-latest
+            runner: macos-latest  # ARM64 runner for arm64 builds
             cgo_enabled: 1
             static: false
           # Windows builds (CGO disabled due to complexity)
@@ -167,6 +167,9 @@ jobs:
       if: matrix.os == 'darwin'
       run: |
         brew install librtlsdr pkg-config
+        
+        # Set up environment for cross-compilation
+        echo "PKG_CONFIG_PATH=$(brew --prefix librtlsdr)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
     - name: Set up build environment
       run: |
@@ -185,12 +188,16 @@ jobs:
         mkdir -p dist
         version="${{ needs.version.outputs.version }}"
         
+        # Debug: Print build environment
+        echo "Building for GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
+        go env
+        
         if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
           if [ "${{ matrix.static }}" = "true" ]; then
             # Static build for Linux - fix the linking issue
             go build -ldflags "-linkmode external -extldflags '-static -lusb-1.0' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
           else
-            # Dynamic build for macOS
+            # Dynamic build for macOS and other platforms
             go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
           fi
         else
