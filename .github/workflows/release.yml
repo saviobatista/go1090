@@ -168,12 +168,14 @@ jobs:
 
     - name: Install dependencies (Ubuntu)
       if: matrix.os == 'linux'
+      shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y librtlsdr-dev pkg-config gcc-aarch64-linux-gnu
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
+      shell: bash
       run: |
         brew install librtlsdr pkg-config
         
@@ -181,6 +183,7 @@ jobs:
         echo "PKG_CONFIG_PATH=$(brew --prefix librtlsdr)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
     - name: Set up build environment
+      shell: bash
       run: |
         echo "GOOS=${{ matrix.os }}" >> $GITHUB_ENV
         echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
@@ -188,11 +191,13 @@ jobs:
 
     - name: Set up cross-compilation (Linux ARM64)
       if: matrix.os == 'linux' && matrix.arch == 'arm64'
+      shell: bash
       run: |
         echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
         echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
     - name: Build binary
+      shell: bash
       run: |
         mkdir -p dist
         
@@ -222,6 +227,7 @@ jobs:
         fi
 
     - name: Create release package
+      shell: bash
       run: |
         cd dist
         binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
