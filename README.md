@@ -51,6 +51,17 @@ sudo yum install golang
 sudo dnf install golang
 ```
 
+#### Windows
+```
+⚠️ **Limited Support**: Windows builds currently have RTL-SDR hardware support disabled.
+The Windows executable will compile and run but cannot connect to RTL-SDR devices.
+
+For full RTL-SDR functionality on Windows, use:
+- Windows Subsystem for Linux (WSL) with Linux build
+- Docker container with Linux build
+- Or help contribute full Windows RTL-SDR support (see Contributing section)
+```
+
 ## Installation
 
 1. **Clone or download the project**:
