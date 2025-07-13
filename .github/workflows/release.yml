@@ -171,7 +171,24 @@ jobs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y librtlsdr-dev pkg-config gcc-aarch64-linux-gnu
+        
+        # Install common dependencies
+        sudo apt-get install -y pkg-config
+        
+        # Install architecture-specific dependencies
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          # Add ARM64 architecture and install cross-compilation tools
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64
+          
+          # Install additional libraries needed for static linking on ARM64
+          sudo apt-get install -y libc6-dev:arm64
+        else
+          # AMD64 (native compilation)
+          sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
+        fi
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
@@ -215,8 +232,14 @@ jobs:
         
         if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
           if [ "${{ matrix.static }}" = "true" ]; then
-            # Static build for Linux - fix the linking issue
-            go build -ldflags "-linkmode external -extldflags '-static -lusb-1.0' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+            # Static build for Linux
+            if [ "${{ matrix.arch }}" = "arm64" ]; then
+              # ARM64 static build with cross-compilation
+              go build -ldflags "-linkmode external -extldflags '-static' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+            else
+              # AMD64 static build
+              go build -ldflags "-linkmode external -extldflags '-static' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+            fi
           else
             # Dynamic build for macOS and other platforms
             go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
