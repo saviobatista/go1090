@@ -87,12 +87,36 @@ build-windows: ## Build for Windows (no CGO)
 build-all: build-linux build-linux-arm64 build-darwin build-windows ## Build for all platforms
 
 # Testing
-test: ## Run tests
-	$(GOTEST) -v ./...
+test: ## Run all tests
+	$(GOTEST) -v .
 
-test-coverage: ## Run tests with coverage
-	$(GOTEST) -race -coverprofile=coverage.out -covermode=atomic ./...
+test-unit: ## Run unit tests only
+	$(GOTEST) -v -run "^Test.*(?:Beast|BaseStation|LogRotator).*" .
+
+test-integration: ## Run integration tests only
+	$(GOTEST) -v -run "^TestIntegration" .
+
+test-coverage: ## Run tests with coverage report
+	$(GOTEST) -race -coverprofile=coverage.out -covermode=atomic .
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
+
+test-race: ## Run tests with race detection
+	$(GOTEST) -race -v .
+
+test-short: ## Run short tests only
+	$(GOTEST) -short -v .
+
+test-verbose: ## Run tests with verbose output
+	$(GOTEST) -v -x .
+
+test-bench: ## Run benchmarks
+	$(GOTEST) -bench=. -benchmem .
+
+test-profile: ## Run tests with CPU and memory profiling
+	$(GOTEST) -cpuprofile=cpu.prof -memprofile=mem.prof -bench=. .
+
+test-timeout: ## Run tests with timeout
+	$(GOTEST) -timeout=30s -v .
 
 # Development
 run: build ## Build and run the application
