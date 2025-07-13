@@ -199,6 +199,9 @@ jobs:
           sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
         fi
         
+        # Install static libraries for static linking
+        sudo apt-get install -y librtlsdr0 libusb-1.0-0
+        
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
       shell: bash
@@ -262,13 +265,20 @@ jobs:
         
         if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
           if [ "${{ matrix.static }}" = "true" ]; then
-            # Static build for Linux
+            # Static build for Linux - get static linking flags from pkg-config
+            echo "Getting static linking flags from pkg-config..."
+            echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+            pkg-config --exists librtlsdr && echo "✅ librtlsdr found for static linking" || echo "❌ librtlsdr NOT found"
+            pkg-config --libs librtlsdr || echo "❌ Failed to get dynamic libs"
+            STATIC_LIBS=$(pkg-config --static --libs librtlsdr)
+            echo "Static libs: $STATIC_LIBS"
+            
             if [ "${{ matrix.arch }}" = "arm64" ]; then
               # ARM64 static build with cross-compilation
-              go build -ldflags "-linkmode external -extldflags '-static' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+              go build -ldflags "-linkmode external -extldflags '-static $STATIC_LIBS' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
             else
               # AMD64 static build
-              go build -ldflags "-linkmode external -extldflags '-static' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
+              go build -ldflags "-linkmode external -extldflags '-static $STATIC_LIBS' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
             fi
           else
             # Dynamic build for macOS and other platforms
