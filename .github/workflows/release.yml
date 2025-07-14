@@ -214,8 +214,10 @@ jobs:
           if [ -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
             echo "Microsoft repository content:"
             cat /etc/apt/sources.list.d/microsoft-prod.list || echo "Failed to read Microsoft repo file"
-            # Fix any malformed entries
-            sudo sed -i 's/^deb \[arch=amd64\] \[arch=amd64\]/deb [arch=amd64]/' /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
+            # Fix Microsoft repository to only fetch AMD64 packages
+            sudo sed -i 's/\[arch=amd64,arm64,armhf/\[arch=amd64/' /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
+            echo "Fixed Microsoft repository content:"
+            cat /etc/apt/sources.list.d/microsoft-prod.list || echo "Failed to read Microsoft repo file"
           fi
           
           # Clean up any existing ARM64 package lists to avoid conflicts
