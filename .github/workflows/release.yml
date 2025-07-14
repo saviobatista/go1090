@@ -205,6 +205,11 @@ jobs:
           sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64 || {
             echo "Failed to install ARM64 libraries, but continuing..."
           }
+          
+          # Also install runtime libraries for ARM64
+          sudo apt-get install -y librtlsdr2:arm64 libusb-1.0-0:arm64 || {
+            echo "Failed to install ARM64 runtime libraries, but continuing..."
+          }
         fi
         
     - name: Install dependencies (macOS)
@@ -239,6 +244,10 @@ jobs:
         sudo mkdir -p /usr/lib/aarch64-linux-gnu
         sudo ln -sf /usr/lib/x86_64-linux-gnu/librtlsdr.so /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || true
         sudo ln -sf /usr/lib/x86_64-linux-gnu/libusb-1.0.so /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || true
+        
+        # Ensure ARM64 libraries are properly linked
+        sudo ln -sf /usr/lib/aarch64-linux-gnu/librtlsdr.so.0 /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || true
+        sudo ln -sf /usr/lib/aarch64-linux-gnu/libusb-1.0.so.0 /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || true
 
     - name: Validate setup (ARM64)
       if: matrix.os == 'linux' && matrix.arch == 'arm64'
@@ -253,14 +262,24 @@ jobs:
         echo ""
         echo "Package validation:"
         pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
+        pkg-config --exists libusb-1.0 && echo "✅ libusb-1.0 found" || echo "❌ libusb-1.0 not found"
         dpkg -l | grep librtlsdr || echo "No librtlsdr packages installed"
+        dpkg -l | grep libusb || echo "No libusb packages installed"
         echo ""
         echo "Compiler validation:"
         $CC --version
         echo ""
+        echo "ARM64 library files:"
+        ls -la /usr/lib/aarch64-linux-gnu/librtlsdr* 2>/dev/null || echo "No librtlsdr files found"
+        ls -la /usr/lib/aarch64-linux-gnu/libusb* 2>/dev/null || echo "No libusb files found"
+        echo ""
         echo "Library symlinks:"
         ls -la /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || echo "librtlsdr.so symlink not found"
         ls -la /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || echo "libusb-1.0.so symlink not found"
+        echo ""
+        echo "Testing pkg-config for ARM64:"
+        PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs librtlsdr
+        PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs libusb-1.0
 
     - name: Build binary
       shell: bash
@@ -283,8 +302,15 @@ jobs:
         echo "Validating CGO build environment..."
         echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
         pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr NOT found"
+        pkg-config --exists libusb-1.0 && echo "✅ libusb-1.0 found" || echo "❌ libusb-1.0 NOT found"
         
         # Dynamic build (Linux/macOS)
+        if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+          # For ARM64 cross-compilation, explicitly set CGO flags
+          export CGO_LDFLAGS="-L/usr/lib/aarch64-linux-gnu -lrtlsdr -lusb-1.0"
+          echo "Using explicit CGO_LDFLAGS: $CGO_LDFLAGS"
+        fi
+        
         go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
 
     - name: Create release package
