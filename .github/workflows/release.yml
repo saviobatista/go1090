@@ -2,7 +2,7 @@ name: Auto Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "**" ]  # Build and test on any branch
   workflow_dispatch:
     inputs:
       version_bump:
@@ -14,6 +14,11 @@ on:
           - patch
           - minor
           - major
+      create_release:
+        description: 'Create actual release (only works on main branch)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -26,6 +31,8 @@ jobs:
   version:
     name: Determine Next Version
     runs-on: ubuntu-latest
+    # Only run version/tagging on main branch or when explicitly requested
+    if: github.ref == 'refs/heads/main' || github.event.inputs.create_release == 'true'
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -114,38 +121,34 @@ jobs:
 
   build:
     name: Build for ${{ matrix.os }}-${{ matrix.arch }}
-    needs: version
+    needs: [version]
+    # Always run build for testing, but version job may be skipped
+    if: always()
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          # Linux builds
+          # Linux builds (dynamic linking for reliability)
           - os: linux
             arch: amd64
             runner: ubuntu-latest
             cgo_enabled: 1
-            static: true
+            static: false
           - os: linux
             arch: arm64
             runner: ubuntu-latest
             cgo_enabled: 1
-            static: true
+            static: false
           # macOS builds
           - os: darwin
             arch: amd64
-            runner: macos-latest
+            runner: macos-13  # Intel runner for x86_64 builds
             cgo_enabled: 1
             static: false
           - os: darwin
             arch: arm64
-            runner: macos-latest
+            runner: macos-latest  # ARM64 runner for arm64 builds
             cgo_enabled: 1
-            static: false
-          # Windows builds (CGO disabled due to complexity)
-          - os: windows
-            arch: amd64
-            runner: windows-latest
-            cgo_enabled: 0
             static: false
 
     steps:
@@ -159,16 +162,67 @@ jobs:
 
     - name: Install dependencies (Ubuntu)
       if: matrix.os == 'linux'
+      shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y librtlsdr-dev pkg-config gcc-aarch64-linux-gnu
+        
+        # Install common dependencies
+        sudo apt-get install -y pkg-config build-essential
+        
+        # Install dependencies and cross-compilation tools
+        sudo apt-get install -y librtlsdr-dev libusb-1.0-0-dev
+        
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          # Install cross-compilation tools
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          
+          # Add ARM64 architecture
+          sudo dpkg --add-architecture arm64
+          
+          # Create ARM64-specific repositories using Ubuntu Ports
+          echo "# Ubuntu Ports for ARM64 packages" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-updates multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ noble-security multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          
+          # Clean up any existing ARM64 package lists to avoid conflicts
+          sudo rm -f /var/lib/apt/lists/*arm64*
+          
+          # Update package lists with error handling
+          sudo apt-get update || {
+            echo "apt-get update failed, but continuing with available packages..."
+            # Continue even if some repositories fail
+          }
+          
+          # Install ARM64 libraries
+          sudo apt-get install -y librtlsdr-dev:arm64 libusb-1.0-0-dev:arm64 || {
+            echo "Failed to install ARM64 libraries, but continuing..."
+          }
+          
+          # Also install runtime libraries for ARM64
+          sudo apt-get install -y librtlsdr2:arm64 libusb-1.0-0:arm64 || {
+            echo "Failed to install ARM64 runtime libraries, but continuing..."
+          }
+        fi
         
     - name: Install dependencies (macOS)
       if: matrix.os == 'darwin'
+      shell: bash
       run: |
         brew install librtlsdr pkg-config
+        
+        # Set up environment for cross-compilation
+        echo "PKG_CONFIG_PATH=$(brew --prefix librtlsdr)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
     - name: Set up build environment
+      shell: bash
       run: |
         echo "GOOS=${{ matrix.os }}" >> $GITHUB_ENV
         echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
@@ -176,33 +230,103 @@ jobs:
 
     - name: Set up cross-compilation (Linux ARM64)
       if: matrix.os == 'linux' && matrix.arch == 'arm64'
+      shell: bash
       run: |
         echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+        echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+        
+        # Configure cross-compilation environment for ARM64 libraries
+        echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig" >> $GITHUB_ENV
+        echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+        echo "LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib" >> $GITHUB_ENV
+        
+        # Create symlinks for ARM64 libraries if they don't exist
+        sudo mkdir -p /usr/lib/aarch64-linux-gnu
+        sudo ln -sf /usr/lib/x86_64-linux-gnu/librtlsdr.so /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || true
+        sudo ln -sf /usr/lib/x86_64-linux-gnu/libusb-1.0.so /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || true
+        
+        # Ensure ARM64 libraries are properly linked
+        sudo ln -sf /usr/lib/aarch64-linux-gnu/librtlsdr.so.0 /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || true
+        sudo ln -sf /usr/lib/aarch64-linux-gnu/libusb-1.0.so.0 /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || true
+
+    - name: Validate setup (ARM64)
+      if: matrix.os == 'linux' && matrix.arch == 'arm64'
+      shell: bash
+      run: |
+        echo "Cross-compilation validation:"
+        echo "CC: $CC"
+        echo "CXX: $CXX"
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        echo "PKG_CONFIG_LIBDIR: $PKG_CONFIG_LIBDIR"
+        echo "LIBRARY_PATH: $LIBRARY_PATH"
+        echo ""
+        echo "Package validation:"
+        pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
+        pkg-config --exists libusb-1.0 && echo "✅ libusb-1.0 found" || echo "❌ libusb-1.0 not found"
+        dpkg -l | grep librtlsdr || echo "No librtlsdr packages installed"
+        dpkg -l | grep libusb || echo "No libusb packages installed"
+        echo ""
+        echo "Compiler validation:"
+        $CC --version
+        echo ""
+        echo "ARM64 library files:"
+        ls -la /usr/lib/aarch64-linux-gnu/librtlsdr* 2>/dev/null || echo "No librtlsdr files found"
+        ls -la /usr/lib/aarch64-linux-gnu/libusb* 2>/dev/null || echo "No libusb files found"
+        echo ""
+        echo "Library symlinks:"
+        ls -la /usr/lib/aarch64-linux-gnu/librtlsdr.so 2>/dev/null || echo "librtlsdr.so symlink not found"
+        ls -la /usr/lib/aarch64-linux-gnu/libusb-1.0.so 2>/dev/null || echo "libusb-1.0.so symlink not found"
+        echo ""
+        echo "Testing pkg-config for ARM64:"
+        PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs librtlsdr
+        PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs libusb-1.0
 
     - name: Build binary
+      shell: bash
       run: |
         mkdir -p dist
-        version="${{ needs.version.outputs.version }}"
         
-        if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
-          if [ "${{ matrix.static }}" = "true" ]; then
-            # Static build for Linux - fix the linking issue
-            go build -ldflags "-linkmode external -extldflags '-static -lusb-1.0' -X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-          else
-            # Dynamic build for macOS
-            go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} .
-          fi
+        # Use version from version job if available, otherwise use test version
+        if [ "${{ needs.version.outputs.version }}" != "" ]; then
+          version="${{ needs.version.outputs.version }}"
         else
-          # No CGO build for Windows
-          go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }}.exe .
+          # Test version for non-main branches
+          version="test-$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
         fi
+        
+        echo "Building version: $version"
+        echo "Building for GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
+        go env
+        
+        # CGO build - validate pkg-config can find libraries
+        echo "Validating CGO build environment..."
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr NOT found"
+        pkg-config --exists libusb-1.0 && echo "✅ libusb-1.0 found" || echo "❌ libusb-1.0 NOT found"
+        
+        # Dynamic build (Linux/macOS)
+        if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+          # For ARM64 cross-compilation, explicitly set CGO flags
+          export CGO_LDFLAGS="-L/usr/lib/aarch64-linux-gnu -lrtlsdr -lusb-1.0"
+          echo "Using explicit CGO_LDFLAGS: $CGO_LDFLAGS"
+        fi
+        
+        go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
 
     - name: Create release package
+      shell: bash
       run: |
         cd dist
-        binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
-        package_name="go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}"
+        binary_name="go1090-${{ matrix.os }}-${{ matrix.arch }}"
+        
+        # Use version from version job if available, otherwise use test version
+        if [ "${{ needs.version.outputs.version }}" != "" ]; then
+          package_version="${{ needs.version.outputs.version }}"
+        else
+          package_version="test-$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
+        fi
+        
+        package_name="go1090-${package_version}-${{ matrix.os }}-${{ matrix.arch }}"
         
         mkdir -p "$package_name"
         cp "$binary_name" "$package_name/"
@@ -217,70 +341,69 @@ jobs:
         ## Quick Start
         
         ```bash
-        # Make executable (Linux/macOS only)
-        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        # Make executable
+        chmod +x go1090-${{ matrix.os }}-${{ matrix.arch }}
         
         # Run with default settings
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }}
         ```
         
         ## Dependencies
         
         ${{ matrix.os == 'linux' && '### Linux
+        **Required**: Install RTL-SDR runtime libraries
+        
         ```bash
-        # Ubuntu/Debian
-        sudo apt-get install librtlsdr0
+        # Ubuntu/Debian 
+        sudo apt-get install librtlsdr2 libusb-1.0-0
         
         # CentOS/RHEL/Fedora
-        sudo yum install rtl-sdr
+        sudo yum install rtl-sdr libusb
+        # or: sudo dnf install rtl-sdr libusb
         ```' || '' }}
         
         ${{ matrix.os == 'darwin' && '### macOS
+        **Required**: Install RTL-SDR libraries
+        
         ```bash
         brew install librtlsdr
         ```' || '' }}
-        
-        ${{ matrix.os == 'windows' && '### Windows
-        **Note**: This Windows build has RTL-SDR support disabled.
-        For full functionality, use Linux or macOS builds, or build from source.' || '' }}
         
         ## Usage
         
         ```bash
         # Show help
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --help
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }} --help
         
         # Run with custom settings
-        ./go1090-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }} --verbose --log-dir ./logs
+        ./go1090-${{ matrix.os }}-${{ matrix.arch }} --verbose --log-dir ./logs
         ```
         
         For more information, see README.md
         EOF
         
         # Create ZIP archive
-        if [ "${{ matrix.os }}" = "windows" ]; then
-          zip -r "${package_name}.zip" "$package_name"
-        else
-          zip -r "${package_name}.zip" "$package_name"
-        fi
+        zip -r "${package_name}.zip" "$package_name"
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: go1090-${{ matrix.os }}-${{ matrix.arch }}
-        path: dist/go1090-${{ needs.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.zip
+        path: dist/go1090-*-${{ matrix.os }}-${{ matrix.arch }}.zip
 
   release:
     name: Create Release
     needs: [version, build]
     runs-on: ubuntu-latest
+    # Only create releases on main branch or when explicitly requested
+    if: (github.ref == 'refs/heads/main' || github.event.inputs.create_release == 'true') && needs.version.result == 'success'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: artifacts
 
@@ -305,23 +428,19 @@ jobs:
         fi
         
         # Add download section
-        cat >> RELEASE_NOTES.md << 'EOF'
+        cat >> RELEASE_NOTES.md << EOF
         
         ## Downloads
         
         Choose the appropriate ZIP file for your system:
         
         ### Linux
-        - **Linux x64**: `go1090-${{ needs.version.outputs.version }}-linux-amd64.zip`
-        - **Linux ARM64**: `go1090-${{ needs.version.outputs.version }}-linux-arm64.zip`
+        - **Linux x64**: \`go1090-${{ needs.version.outputs.version }}-linux-amd64.zip\`
+        - **Linux ARM64**: \`go1090-${{ needs.version.outputs.version }}-linux-arm64.zip\`
         
         ### macOS
-        - **macOS Intel**: `go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip`
-        - **macOS Apple Silicon**: `go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip`
-        
-        ### Windows
-        - **Windows x64**: `go1090-${{ needs.version.outputs.version }}-windows-amd64.zip`
-        - ⚠️ **Note**: Windows build has limited RTL-SDR support
+        - **macOS Intel**: \`go1090-${{ needs.version.outputs.version }}-darwin-amd64.zip\`
+        - **macOS Apple Silicon**: \`go1090-${{ needs.version.outputs.version }}-darwin-arm64.zip\`
         
         ## Installation
         
@@ -339,34 +458,66 @@ jobs:
         EOF
 
     - name: Create Release
-      uses: actions/create-release@v1
-      id: create_release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ needs.version.outputs.tag }}
-        release_name: Go1090 ${{ needs.version.outputs.tag }}
+        name: Go1090 ${{ needs.version.outputs.tag }}
         body_path: RELEASE_NOTES.md
         draft: false
         prerelease: false
-
-    - name: Upload Release Assets
-      run: |
-        for file in artifacts/*/go1090-${{ needs.version.outputs.version }}-*.zip; do
-          if [ -f "$file" ]; then
-            filename=$(basename "$file")
-            echo "Uploading $filename"
-            gh release upload ${{ needs.version.outputs.tag }} "$file"
-          fi
-        done
+        files: |
+          artifacts/*/go1090-*-*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  notification:
-    name: Send Notification
-    needs: [version, release]
+  test-summary:
+    name: Test Summary
+    needs: [version, build]
     runs-on: ubuntu-latest
     if: always()
+    
+    steps:
+    - name: Test Build Summary
+      run: |
+        echo "## 🧪 Pipeline Test Summary"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+        echo ""
+        
+        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          echo "✅ Running on main branch - releases will be created"
+        else
+          echo "🔄 Running on feature branch - testing only (no releases)"
+        fi
+        
+        echo ""
+        echo "### Build Status:"
+        if [ "${{ needs.build.result }}" = "success" ]; then
+          echo "✅ All builds completed successfully"
+        else
+          echo "❌ Some builds failed"
+        fi
+        
+        echo ""
+        echo "### Version Status:"
+        if [ "${{ needs.version.result }}" = "success" ]; then
+          echo "✅ Version determined: ${{ needs.version.outputs.version }}"
+        elif [ "${{ needs.version.result }}" = "skipped" ]; then
+          echo "⏭️  Version job skipped (not on main branch)"
+        else
+          echo "❌ Version job failed"
+        fi
+        
+        echo ""
+        echo "To create an actual release:"
+        echo "1. Push to main branch, OR"
+        echo "2. Manually trigger with 'create_release' = true"
+
+  notification:
+    name: Release Notification
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    if: always() && needs.release.result != 'skipped'
     
     steps:
     - name: Notify Success

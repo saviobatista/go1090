@@ -1,8 +1,9 @@
+//go:build cgo
+
 package main
 
 /*
-#cgo CFLAGS: -I/opt/homebrew/opt/librtlsdr/include
-#cgo LDFLAGS: -L/opt/homebrew/opt/librtlsdr/lib -lrtlsdr
+#cgo pkg-config: librtlsdr
 #include <rtl-sdr.h>
 #include <stdlib.h>
 #include <stdint.h>
