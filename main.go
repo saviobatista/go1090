@@ -287,6 +287,10 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 		typeCode := msg.GetTypeCode()
 		transmissionType := "3" // Default to airborne position
 
+		if app.verbose {
+			app.logger.Debugf("Extended Squitter: DF=%d, TypeCode=%d, ICAO=%06X", df, typeCode, msg.GetICAO())
+		}
+
 		// Initialize all fields as empty
 		callsign := ""
 		altitude := ""
@@ -308,24 +312,65 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 			transmissionType = "1"
 			callsign = app.extractCallsign(msg.Data[:])
 
+		case typeCode >= 5 && typeCode <= 8:
+			// Surface position
+			transmissionType = "2"
+			isOnGround = "1"
+			if lat, lon := app.extractPosition(msg.Data[:]); lat != 0 || lon != 0 {
+				latitude = fmt.Sprintf("%.6f", lat)
+				longitude = fmt.Sprintf("%.6f", lon)
+			}
+
 		case typeCode >= 9 && typeCode <= 18:
 			// Airborne position
 			transmissionType = "3"
 			if alt := app.extractAltitude(msg.Data[:]); alt != 0 {
 				altitude = fmt.Sprintf("%d", alt)
 			}
-			// Position decoding would go here (requires CPR)
+			// Extract position (lat/lon)
+			if lat, lon := app.extractPosition(msg.Data[:]); lat != 0 || lon != 0 {
+				latitude = fmt.Sprintf("%.6f", lat)
+				longitude = fmt.Sprintf("%.6f", lon)
+			}
 
 		case typeCode >= 19 && typeCode <= 22:
 			// Airborne velocity
 			transmissionType = "4"
+			if app.verbose {
+				app.logger.Debugf("Processing velocity message, type code: %d", typeCode)
+			}
 			if speed, trk, vrate := app.extractVelocity(msg.Data[:]); speed != 0 {
 				groundSpeed = fmt.Sprintf("%d", speed)
 				track = fmt.Sprintf("%.1f", trk)
 				if vrate != 0 {
 					verticalRate = fmt.Sprintf("%d", vrate)
 				}
+				if app.verbose {
+					app.logger.Debugf("Extracted velocity: speed=%d, track=%.1f, vrate=%d", speed, trk, vrate)
+				}
+			} else if app.verbose {
+				app.logger.Debugf("Failed to extract velocity data")
 			}
+
+		case typeCode == 28:
+			// Aircraft status
+			transmissionType = "7"
+			if app.verbose {
+				app.logger.Debugf("Aircraft status message received")
+			}
+
+		case typeCode == 31:
+			// Aircraft operation status
+			transmissionType = "8"
+			if app.verbose {
+				app.logger.Debugf("Aircraft operation status message received")
+			}
+
+		default:
+			if app.verbose {
+				app.logger.Debugf("Unhandled type code: %d", typeCode)
+			}
+			// For unknown type codes, use default transmission type 3
 		}
 
 		return fmt.Sprintf("MSG,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
@@ -337,18 +382,28 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 	case 4, 5, 20, 21: // Surveillance replies
 		transmissionType := "5" // Surveillance
 
+		if app.verbose {
+			app.logger.Debugf("Surveillance message: DF=%d, ICAO=%06X", df, msg.GetICAO())
+		}
+
 		altitude := ""
 		squawk := ""
 
 		if df == 4 || df == 20 {
 			if alt := app.extractAltitude(msg.Data[:]); alt != 0 {
 				altitude = fmt.Sprintf("%d", alt)
+				if app.verbose {
+					app.logger.Debugf("Surveillance altitude: %d", alt)
+				}
 			}
 		}
 
 		if df == 5 || df == 21 {
 			if sq := app.extractSquawk(msg.Data[:]); sq != 0 {
 				squawk = fmt.Sprintf("%04d", sq)
+				if app.verbose {
+					app.logger.Debugf("Surveillance squawk: %04d", sq)
+				}
 			}
 		}
 
@@ -356,6 +411,12 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 			transmissionType, sessionID, aircraftID, icao, flightID,
 			dateStr, timeStr, dateStr, timeStr,
 			altitude, squawk, "0")
+
+	default:
+		if app.verbose {
+			app.logger.Debugf("Unhandled DF: %d, ICAO=%06X", df, msg.GetICAO())
+		}
+		return "" // Skip unknown downlink formats
 	}
 
 	return "" // Unsupported message type
@@ -470,46 +531,88 @@ func (app *Application) extractSquawk(data []byte) int {
 // extractVelocity extracts velocity information from airborne velocity messages
 func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 	if len(data) < 11 {
+		if app.verbose {
+			app.logger.Debugf("Velocity extraction failed: data too short (%d bytes)", len(data))
+		}
 		return 0, 0, 0
 	}
 
 	// Extract velocity subtype
 	subtype := (data[4] >> 1) & 0x07
 
-	if subtype != 1 && subtype != 2 {
-		return 0, 0, 0 // Only handle groundspeed subtypes
+	if app.verbose {
+		app.logger.Debugf("Velocity message: subtype=%d, data=%x", subtype, data[:11])
 	}
 
-	// Extract east-west velocity
-	ewDir := (data[5] >> 2) & 0x01
-	ewVel := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+	if subtype != 1 && subtype != 2 && subtype != 3 && subtype != 4 {
+		if app.verbose {
+			app.logger.Debugf("Velocity extraction failed: unsupported subtype %d", subtype)
+		}
+		return 0, 0, 0 // Only handle groundspeed and airspeed subtypes
+	}
 
-	// Extract north-south velocity
-	nsDir := (data[7] >> 7) & 0x01
-	nsVel := (((uint16(data[7]&0x7F) << 3) | (uint16(data[8]) >> 5)) & 0x3FF) - 1
-
-	// Convert to signed values
 	var ewSpeed, nsSpeed float64
-	if ewDir == 1 {
-		ewSpeed = -float64(ewVel)
-	} else {
-		ewSpeed = float64(ewVel)
+	var groundSpeed int
+	var track float64
+
+	if subtype == 1 || subtype == 2 {
+		// Ground speed subtypes
+		// Extract east-west velocity
+		ewDir := (data[5] >> 2) & 0x01
+		ewVel := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+
+		// Extract north-south velocity
+		nsDir := (data[7] >> 7) & 0x01
+		nsVel := (((uint16(data[7]&0x7F) << 3) | (uint16(data[8]) >> 5)) & 0x3FF) - 1
+
+		if app.verbose {
+			app.logger.Debugf("Ground speed components: ewDir=%d, ewVel=%d, nsDir=%d, nsVel=%d", ewDir, ewVel, nsDir, nsVel)
+		}
+
+		// Convert to signed values
+		if ewDir == 1 {
+			ewSpeed = -float64(ewVel)
+		} else {
+			ewSpeed = float64(ewVel)
+		}
+
+		if nsDir == 1 {
+			nsSpeed = -float64(nsVel)
+		} else {
+			nsSpeed = float64(nsVel)
+		}
+
+		// Calculate ground speed and track
+		groundSpeed = int(math.Sqrt(ewSpeed*ewSpeed + nsSpeed*nsSpeed))
+		track = math.Atan2(ewSpeed, nsSpeed) * 180.0 / math.Pi
+		if track < 0 {
+			track += 360
+		}
+
+	} else if subtype == 3 || subtype == 4 {
+		// Airspeed subtypes
+		// Extract airspeed
+		airspeedAvail := (data[5] >> 2) & 0x01
+		airspeed := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+
+		// Extract heading
+		headingAvail := (data[7] >> 2) & 0x01
+		heading := float64(((uint16(data[7]&0x03)<<8)|uint16(data[8]))*360) / 1024.0
+
+		if app.verbose {
+			app.logger.Debugf("Airspeed data: airspeedAvail=%d, airspeed=%d, headingAvail=%d, heading=%.1f",
+				airspeedAvail, airspeed, headingAvail, heading)
+		}
+
+		if airspeedAvail == 1 && airspeed > 0 {
+			groundSpeed = int(airspeed)
+		}
+		if headingAvail == 1 {
+			track = heading
+		}
 	}
 
-	if nsDir == 1 {
-		nsSpeed = -float64(nsVel)
-	} else {
-		nsSpeed = float64(nsVel)
-	}
-
-	// Calculate ground speed and track
-	groundSpeed := int(math.Sqrt(ewSpeed*ewSpeed + nsSpeed*nsSpeed))
-	track := math.Atan2(ewSpeed, nsSpeed) * 180.0 / math.Pi
-	if track < 0 {
-		track += 360
-	}
-
-	// Extract vertical rate
+	// Extract vertical rate (common for all subtypes)
 	vrSign := (data[8] >> 3) & 0x01
 	vrValue := ((uint16(data[8]&0x07) << 6) | (uint16(data[9]) >> 2)) & 0x1FF
 
@@ -521,7 +624,50 @@ func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 		}
 	}
 
-	return groundSpeed, track, verticalRate
+	if app.verbose {
+		app.logger.Debugf("Velocity result: groundSpeed=%d, track=%.1f, verticalRate=%d", groundSpeed, track, verticalRate)
+	}
+
+	// Return data even if only partial information is available
+	// For MSG,4 to be useful, we need at least speed, track, or vertical rate
+	if groundSpeed > 0 || track > 0 || verticalRate != 0 {
+		return groundSpeed, track, verticalRate
+	}
+
+	return 0, 0, 0
+}
+
+// extractPosition extracts latitude and longitude from position messages
+func (app *Application) extractPosition(data []byte) (float64, float64) {
+	if len(data) < 11 {
+		return 0, 0
+	}
+
+	// CPR (Compact Position Reporting) decoding is complex and requires
+	// both odd and even frames to determine exact position
+	// For now, return 0,0 as proper CPR decoding needs significant implementation
+	//
+	// Basic extraction of CPR encoded latitude and longitude:
+	// Bits 22-39: 18-bit latitude CPR
+	// Bits 40-56: 17-bit longitude CPR
+	// Bit 21: F flag (odd/even frame)
+
+	// Extract F flag (odd/even)
+	fFlag := (data[6] >> 2) & 0x01
+
+	// Extract CPR latitude (17 bits)
+	cprLatRaw := ((uint32(data[6]&0x03) << 15) | (uint32(data[7]) << 7) | (uint32(data[8]) >> 1)) & 0x1FFFF
+
+	// Extract CPR longitude (17 bits)
+	cprLonRaw := ((uint32(data[8]&0x01) << 16) | (uint32(data[9]) << 8) | uint32(data[10])) & 0x1FFFF
+
+	if app.verbose {
+		app.logger.Debugf("CPR position data: F=%d, lat_cpr=%d, lon_cpr=%d", fFlag, cprLatRaw, cprLonRaw)
+	}
+
+	// TODO: Implement full CPR decoding with both odd/even frames
+	// For now, return 0,0 to indicate position decoding not yet implemented
+	return 0, 0
 }
 
 // reportStatistics reports processing statistics periodically
