@@ -3,6 +3,7 @@ module go1090
 go 1.21
 
 require (
+	github.com/jpoirier/gortlsdr v2.10.0+incompatible
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.7.0
 	github.com/stretchr/testify v1.7.0

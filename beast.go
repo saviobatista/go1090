@@ -44,6 +44,14 @@ func (d *BeastDecoder) Decode(data []byte) ([]*BeastMessage, error) {
 
 	var messages []*BeastMessage
 
+	// Debug: Log buffer state occasionally
+	if len(d.buffer) > 0 && len(d.buffer)%1024 == 0 {
+		d.logger.WithFields(logrus.Fields{
+			"buffer_size": len(d.buffer),
+			"data_length": len(data),
+		}).Debug("Beast decoder buffer status")
+	}
+
 	for {
 		// Look for sync byte
 		syncIndex := -1
@@ -56,6 +64,11 @@ func (d *BeastDecoder) Decode(data []byte) ([]*BeastMessage, error) {
 
 		if syncIndex == -1 {
 			// No sync byte found, clear buffer
+			if len(d.buffer) > 1024 {
+				d.logger.WithFields(logrus.Fields{
+					"buffer_size": len(d.buffer),
+				}).Debug("No sync byte found, clearing buffer")
+			}
 			d.buffer = d.buffer[:0]
 			break
 		}
@@ -75,6 +88,9 @@ func (d *BeastDecoder) Decode(data []byte) ([]*BeastMessage, error) {
 
 		if messageLen == 0 {
 			// Unknown message type, skip this sync byte
+			d.logger.WithFields(logrus.Fields{
+				"message_type": fmt.Sprintf("0x%02x", messageType),
+			}).Debug("Unknown message type, skipping")
 			d.buffer = d.buffer[1:]
 			continue
 		}
@@ -88,6 +104,13 @@ func (d *BeastDecoder) Decode(data []byte) ([]*BeastMessage, error) {
 		messageData := make([]byte, messageLen)
 		copy(messageData, d.buffer[:messageLen])
 
+		// Debug: Log message detection
+		d.logger.WithFields(logrus.Fields{
+			"message_type": fmt.Sprintf("0x%02x", messageType),
+			"message_len":  messageLen,
+			"buffer_size":  len(d.buffer),
+		}).Debug("Found potential Beast message")
+
 		// Decode message
 		msg, err := d.decodeMessage(messageData)
 		if err != nil {
@@ -95,6 +118,13 @@ func (d *BeastDecoder) Decode(data []byte) ([]*BeastMessage, error) {
 			d.buffer = d.buffer[1:]
 			continue
 		}
+
+		// Debug: Log successful message decode
+		d.logger.WithFields(logrus.Fields{
+			"message_type": fmt.Sprintf("0x%02x", msg.MessageType),
+			"signal":       msg.Signal,
+			"data_length":  len(msg.Data),
+		}).Debug("Successfully decoded Beast message")
 
 		messages = append(messages, msg)
 

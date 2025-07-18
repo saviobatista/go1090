@@ -1,286 +1,157 @@
 # Go1090 - ADS-B Beast Mode Decoder
 
-Go1090 is a Go application that captures ADS-B (Automatic Dependent Surveillance-Broadcast) messages from RTL-SDR devices, decodes Beast mode messages, and logs them in BaseStation format with automatic daily log rotation and compression.
+A simplified ADS-B decoder written in Go that captures I/Q samples from RTL-SDR devices and attempts to convert them to BaseStation (SBS) format.
 
 ## Features
 
-- **RTL-SDR Integration**: Direct interface with RTL2832U USB devices via librtlsdr
-- **Beast Mode Decoding**: Decodes Beast mode messages (Mode A/C, Mode S short/long)
-- **BaseStation Format**: Outputs logs in industry-standard BaseStation CSV format
-- **Auto-Restart**: Automatically restarts on failures for continuous operation
-- **Daily Log Rotation**: Rotates logs daily at 00:00 UTC with gzip compression
-- **Configurable**: Command-line options for frequency, gain, device selection, etc.
+- **RTL-SDR Integration**: Direct integration with RTL-SDR devices using the gortlsdr library
+- **Beast Mode Processing**: Decodes Beast mode ADS-B messages  
+- **SBS Output**: Converts messages to BaseStation (SBS) format for compatibility with other ADS-B tools
+- **Real-time Processing**: Processes I/Q samples in real-time
+- **Configurable Parameters**: Adjustable frequency, sample rate, and gain settings
 
-## Requirements
+## Prerequisites
 
-### Hardware
-- RTL2832U USB SDR dongle (RTL-SDR)
-- Antenna suitable for 1090MHz reception
+### macOS (Apple Silicon/Intel)
 
-### Software Dependencies
-
-#### macOS
-```bash
-# Install librtlsdr using Homebrew
-brew install librtlsdr
-
-# Install Go 1.21 or later
-brew install go
-```
-
-#### Ubuntu/Debian
-```bash
-# Install librtlsdr development libraries
-sudo apt-get update
-sudo apt-get install librtlsdr-dev librtlsdr0 rtl-sdr
-
-# Install Go 1.21 or later
-sudo apt-get install golang-go
-```
-
-#### CentOS/RHEL/Fedora
-```bash
-# Install librtlsdr development libraries
-sudo yum install rtl-sdr-devel rtl-sdr
-# Or for newer versions:
-sudo dnf install rtl-sdr-devel rtl-sdr
-
-# Install Go 1.21 or later
-sudo yum install golang
-# Or for newer versions:
-sudo dnf install golang
-```
-
-## Installation
-
-1. **Clone or download the project**:
+1. **Install Homebrew** (if not already installed):
    ```bash
-   git clone <repository-url>
-   cd go1090
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
    ```
 
-2. **Install Go dependencies**:
+2. **Install librtlsdr**:
    ```bash
-   go mod tidy
+   brew install librtlsdr
    ```
 
-3. **Build the application**:
+3. **Install Go** (if not already installed):
    ```bash
-   go build -o go1090
+   brew install go
    ```
+
+### Linux
+
+1. **Install librtlsdr development package**:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get update
+   sudo apt-get install librtlsdr-dev pkg-config
+
+   # CentOS/RHEL/Fedora
+   sudo yum install rtl-sdr-devel pkgconfig
+   # or
+   sudo dnf install rtl-sdr-devel pkgconfig
+   ```
+
+## Building
+
+### macOS
+```bash
+# Clone the repository
+git clone <repository-url>
+cd go1090
+
+# Use the provided build script
+./build.sh
+```
+
+### Linux
+```bash
+# Clone the repository
+git clone <repository-url>
+cd go1090
+
+# Build with standard go build
+go build .
+```
 
 ## Usage
 
 ### Basic Usage
-
 ```bash
-# Run with default settings (1090MHz, device 0)
+# Use default settings (1090 MHz, auto gain)
 ./go1090
 
-# Run with verbose logging
+# Specify custom frequency and gain
+./go1090 --frequency 1090000000 --gain 40 --device 0
+
+# Enable verbose logging
 ./go1090 --verbose
 
-# Specify custom frequency and gain
-./go1090 --frequency 1090000000 --gain 40
-
-# Use a different RTL-SDR device
-./go1090 --device 1
-
-# Custom log directory
-./go1090 --log-dir /var/log/adsb
+# Use a different log directory
+./go1090 --log-dir /path/to/logs
 ```
 
 ### Command Line Options
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-f, --frequency` | 1090000000 | Frequency to tune to (Hz) |
+| `-s, --sample-rate` | 2000000 | Sample rate (Hz) |
+| `-g, --gain` | 40 | Gain setting (0 for auto) |
+| `-d, --device` | 0 | RTL-SDR device index |
+| `-l, --log-dir` | ./logs | Log directory |
+| `-u, --utc` | true | Use UTC for log rotation |
+| `-v, --verbose` | false | Verbose logging |
+| `--version` | false | Show version information |
+
+## Output Format
+
+The tool outputs messages in BaseStation (SBS) format, which is compatible with many ADS-B applications. Messages are logged to files in the specified log directory with automatic rotation.
+
+Example SBS message:
 ```
-Usage:
-  go1090 [flags]
-
-Flags:
-  -d, --device int          RTL-SDR device index (default 0)
-  -f, --frequency uint32    Frequency to tune to (Hz) (default 1090000000)
-  -g, --gain int            Gain setting (default 40)
-  -h, --help                help for go1090
-  -l, --log-dir string      Log directory (default "./logs")
-  -s, --sample-rate uint32  Sample rate (Hz) (default 2000000)
-  -u, --utc                 Use UTC for log rotation (default true)
-  -v, --verbose             Verbose logging
-```
-
-### Finding Your RTL-SDR Device
-
-To list available RTL-SDR devices:
-```bash
-# Using rtl_test utility
-rtl_test
-
-# Or check with lsusb
-lsusb | grep RTL
+MSG,3,111,11111,A12345,FlightID,2023/12/25,10:30:45.123,2023/12/25,10:30:45.123,UAL123,35000,450,180,40.7128,-74.0060,0,0400,0,0,0,0
 ```
 
-## Configuration
+## Current Limitations
 
-### Optimal Settings
+⚠️ **Important Note**: This is a simplified implementation with the following limitations:
 
-For ADS-B reception, the following settings are recommended:
+1. **Basic ADS-B Demodulation**: The current ADS-B demodulation is very basic and may not detect all messages correctly.
 
-- **Frequency**: 1090000000 Hz (1090MHz - ADS-B frequency)
-- **Sample Rate**: 2000000 Hz (2MHz - sufficient for ADS-B)
-- **Gain**: 40 (adjust based on your antenna and local environment)
+2. **No Proper Preamble Detection**: The implementation lacks sophisticated ADS-B preamble detection and framing.
 
-### Gain Settings
+3. **Limited Message Processing**: Only basic Beast mode message processing is implemented.
 
-- **0**: Automatic gain control (AGC)
-- **1-49**: Manual gain settings (device-dependent)
-- **40**: Good starting point for most setups
+4. **No Position Decoding**: CPR (Compact Position Reporting) decoding is not fully implemented.
 
-You may need to experiment with gain settings based on your local RF environment and antenna setup.
+## How It Works
 
-## Log Format
-
-The application outputs logs in BaseStation format, which is a CSV format with the following fields:
-
-```
-MSG,transmission_type,session_id,aircraft_id,hex_ident,flight_id,date_generated,time_generated,date_logged,time_logged,callsign,altitude,ground_speed,track,latitude,longitude,vertical_rate,squawk,alert,emergency,spi,is_on_ground
-```
-
-### Example Output
-
-```
-MSG,3,1,1,4CA2B6,1,2023/12/07,14:30:25.123,2023/12/07,14:30:25.123,,35000,450,180.5,40.123456,-74.567890,,,,,0,0
-MSG,1,1,1,4CA2B6,1,2023/12/07,14:30:26.456,2023/12/07,14:30:26.456,UAL123,,,,,,,,,,,0
-```
-
-## Log Rotation
-
-- **Daily Rotation**: Logs are rotated daily at 00:00 UTC (configurable)
-- **Compression**: Old logs are automatically compressed with gzip
-- **Naming**: Log files are named `adsb_YYYY-MM-DD.log`
-- **Compressed**: Old files become `adsb_YYYY-MM-DD.log.gz`
-
-## Error Handling
-
-The application includes robust error handling:
-
-- **Auto-restart**: Automatically restarts on RTL-SDR failures
-- **Graceful shutdown**: Handles SIGINT/SIGTERM signals
-- **Log rotation**: Continues even if individual components fail
-- **Device recovery**: Attempts to reinitialize RTL-SDR on errors
+1. **RTL-SDR Capture**: Captures I/Q samples at 2 MHz sample rate on 1090 MHz
+2. **Envelope Detection**: Converts I/Q samples to envelope (magnitude) data
+3. **Simple Demodulation**: Basic threshold-based bit detection
+4. **Beast Mode Processing**: Attempts to decode the demodulated data as Beast mode messages
+5. **SBS Conversion**: Converts valid messages to BaseStation format
+6. **Logging**: Writes output to rotating log files
 
 ## Troubleshooting
 
-### Common Issues
+### "no RTL-SDR devices found"
+- Ensure your RTL-SDR device is connected
+- Check that librtlsdr can detect the device: `rtl_test`
+- Try running with sudo (may be needed for device access)
 
-1. **"no RTL-SDR devices found"**:
-   - Ensure RTL-SDR device is plugged in
-   - Check that librtlsdr is installed
-   - Verify device permissions (may need udev rules)
+### Build Errors
+- Ensure librtlsdr is properly installed
+- On macOS, make sure you're using the build script that sets proper CGO flags
+- Verify Go version compatibility (requires Go 1.21+)
 
-2. **"failed to open RTL-SDR device"**:
-   - Device may be in use by another application
-   - Check device permissions
-   - Try a different device index
+### No Messages Detected
+- The current implementation is basic and may miss many messages
+- Try adjusting the gain setting
+- Ensure you have a proper ADS-B antenna connected
+- Consider using established tools like dump1090 for comparison
 
-3. **Build errors about librtlsdr**:
-   - Ensure librtlsdr-dev is installed
-   - Check that CGO is enabled: `go env CGO_ENABLED`
+## For Production Use
 
-4. **Permission denied errors**:
-   - Add user to 'dialout' group (Linux): `sudo usermod -a -G dialout $USER`
-   - Create udev rules for RTL-SDR device
-   - Run with sudo (not recommended for production)
+For production ADS-B decoding, consider using established tools like:
+- **dump1090**: Well-established ADS-B decoder
+- **rtl_adsb**: Simple ADS-B decoder included with rtl-sdr
+- **readsb**: Modern fork of dump1090
 
-### Creating udev Rules (Linux)
-
-Create `/etc/udev/rules.d/20-rtlsdr.rules`:
-```
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", GROUP="adm", MODE="0666", SYMLINK+="rtl_sdr"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", GROUP="adm", MODE="0666", SYMLINK+="rtl_sdr"
-```
-
-Then reload udev rules:
-```bash
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-## Running as a Service
-
-### systemd Service (Linux)
-
-Create `/etc/systemd/system/go1090.service`:
-```ini
-[Unit]
-Description=Go1090 ADS-B Beast Mode Decoder
-After=network.target
-
-[Service]
-Type=simple
-User=adsb
-Group=adsb
-WorkingDirectory=/opt/go1090
-ExecStart=/opt/go1090/go1090 --log-dir /var/log/go1090
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-```bash
-sudo systemctl enable go1090
-sudo systemctl start go1090
-```
-
-### launchd Service (macOS)
-
-Create `~/Library/LaunchAgents/com.go1090.plist`:
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.go1090</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/go1090</string>
-        <string>--log-dir</string>
-        <string>/var/log/go1090</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-```
-
-Load:
-```bash
-launchctl load ~/Library/LaunchAgents/com.go1090.plist
-```
-
-## Performance Notes
-
-- **CPU Usage**: Moderate CPU usage during active reception
-- **Memory**: Low memory footprint (~10-50MB)
-- **Disk I/O**: Continuous writing to log files
-- **Network**: No network usage (local processing only)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
+This Go implementation serves as a learning tool and starting point for custom ADS-B processing applications.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-The MIT License was chosen to maximize adoption in the aviation community and allow both commercial and educational use.
-
-## Acknowledgments
-
-- RTL-SDR project for the excellent SDR library
-- ADS-B decoding community for protocol documentation
-- Go community for excellent libraries and tools 
+This project is provided as-is for educational and experimental purposes. 

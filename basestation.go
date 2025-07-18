@@ -109,6 +109,14 @@ func (w *BaseStationWriter) WriteMessage(msg *BeastMessage) error {
 	return nil
 }
 
+// WriteADSBMessage writes an ADS-B message in BaseStation format (placeholder for future use)
+func (w *BaseStationWriter) WriteADSBMessage(data []byte) error {
+	// For now, this is a placeholder
+	// In the future, this could handle raw ADS-B data
+	w.logger.Debug("WriteADSBMessage called (not implemented)")
+	return nil
+}
+
 // convertMessage converts a Beast message to BaseStation format
 func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessage {
 	now := time.Now()
@@ -200,38 +208,40 @@ func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessag
 						baseMsg.Longitude = fmt.Sprintf("%.6f", lon)
 					}
 
+					// Extract altitude
 					altitude := w.extractAltitude(msg.Data)
 					if altitude != 0 {
 						baseMsg.Altitude = strconv.Itoa(altitude)
 					}
 
-				case typeCode == 19:
+				case typeCode >= 19 && typeCode <= 22:
 					// Airborne velocity
 					baseMsg.TransmissionType = TransmissionES_VELOCITY
-					speed, track, vrate := w.extractVelocity(msg.Data)
-					if speed != 0 {
-						baseMsg.GroundSpeed = strconv.Itoa(speed)
+					groundSpeed, track, verticalRate := w.extractVelocity(msg.Data)
+					if groundSpeed != 0 {
+						baseMsg.GroundSpeed = strconv.Itoa(groundSpeed)
 					}
 					if track != 0 {
 						baseMsg.Track = fmt.Sprintf("%.1f", track)
 					}
-					if vrate != 0 {
-						baseMsg.VerticalRate = strconv.Itoa(vrate)
+					if verticalRate != 0 {
+						baseMsg.VerticalRate = strconv.Itoa(verticalRate)
 					}
 				}
 			}
-
-		default:
-			// Unsupported DF
-			return nil
 		}
 
 		return baseMsg
-
-	default:
-		// Unsupported message type
-		return nil
 	}
+
+	return nil
+}
+
+// convertADSBMessage converts raw ADS-B data to BaseStation format (placeholder for future use)
+func (w *BaseStationWriter) convertADSBMessage(data []byte) *BaseStationMessage {
+	// This is a placeholder for future ADS-B message parsing
+	// For now, return nil to indicate no conversion
+	return nil
 }
 
 // formatCSV formats a BaseStation message as CSV
