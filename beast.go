@@ -9,6 +9,7 @@ import (
 
 // Beast mode message types
 const (
+	BeastSyncByte   = 0x1A // Beast mode sync byte
 	BeastModeAC     = 0x31 // Mode A/C
 	BeastModeS      = 0x32 // Mode S Short (56 bits)
 	BeastModeSLong  = 0x33 // Mode S Long (112 bits)

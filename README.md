@@ -1,14 +1,26 @@
-# Go1090 - ADS-B Beast Mode Decoder
+# Go1090 - ADS-B Decoder (dump1090-style)
 
-A simplified ADS-B decoder written in Go that captures I/Q samples from RTL-SDR devices and attempts to convert them to BaseStation (SBS) format.
+A Go implementation of an ADS-B decoder that mimics the functionality of dump1090. Captures I/Q samples from RTL-SDR devices, performs proper ADS-B demodulation with preamble detection, validates messages with CRC, and outputs in BaseStation (SBS) format.
+
+## ✨ What's New
+
+This implementation now works **just like dump1090**:
+
+- ✅ **Proper ADS-B Demodulation**: Real PPM (Pulse Position Modulation) demodulation
+- ✅ **Preamble Detection**: Detects actual ADS-B preamble patterns
+- ✅ **CRC Validation**: Validates messages using ADS-B CRC-24 checksum
+- ✅ **Message Parsing**: Extracts callsigns, altitudes, velocities, squawk codes
+- ✅ **Real-time Output**: Prints valid messages to stdout like dump1090
+- ✅ **SBS Format**: Compatible with existing ADS-B tools and databases
 
 ## Features
 
-- **RTL-SDR Integration**: Direct integration with RTL-SDR devices using the gortlsdr library
-- **Beast Mode Processing**: Decodes Beast mode ADS-B messages  
-- **SBS Output**: Converts messages to BaseStation (SBS) format for compatibility with other ADS-B tools
-- **Real-time Processing**: Processes I/Q samples in real-time
-- **Configurable Parameters**: Adjustable frequency, sample rate, and gain settings
+- **RTL-SDR Integration**: Direct integration with RTL-SDR devices using gortlsdr
+- **dump1090-style Processing**: Implements the same demodulation approach as dump1090
+- **Real-time Decoding**: Processes I/Q samples in real-time with proper timing
+- **Message Validation**: CRC-24 validation ensures message integrity
+- **Multiple Output**: Both file logging and stdout output (like dump1090)
+- **Statistics Reporting**: Shows processing statistics every 30 seconds
 
 ## Prerequisites
 
@@ -69,7 +81,7 @@ go build .
 
 ### Basic Usage
 ```bash
-# Use default settings (1090 MHz, auto gain)
+# Use default settings (1090 MHz, manual gain 40)
 ./go1090
 
 # Specify custom frequency and gain
@@ -97,60 +109,122 @@ go build .
 
 ## Output Format
 
-The tool outputs messages in BaseStation (SBS) format, which is compatible with many ADS-B applications. Messages are logged to files in the specified log directory with automatic rotation.
+The tool outputs messages in BaseStation (SBS) format, which is compatible with many ADS-B applications. Messages are both:
+- **Printed to stdout** (like dump1090)
+- **Logged to files** with automatic rotation
 
-Example SBS message:
+Example SBS output:
 ```
-MSG,3,111,11111,A12345,FlightID,2023/12/25,10:30:45.123,2023/12/25,10:30:45.123,UAL123,35000,450,180,40.7128,-74.0060,0,0400,0,0,0,0
+MSG,1,1,1,4CA2B6,1,2023/12/25,10:30:45.123,2023/12/25,10:30:45.123,UAL123,,,,,,,,,,,0
+MSG,3,1,1,4CA2B6,1,2023/12/25,10:30:46.456,2023/12/25,10:30:46.456,,35000,,,,,,,,,,,0
+MSG,4,1,1,4CA2B6,1,2023/12/25,10:30:47.789,2023/12/25,10:30:47.789,,,450,180.5,,,2048,,,,,0
 ```
 
-## Current Limitations
+### Message Types
 
-⚠️ **Important Note**: This is a simplified implementation with the following limitations:
+| Type | Description | Fields |
+|------|-------------|--------|
+| MSG,1 | Aircraft Identification | Callsign |
+| MSG,3 | Airborne Position | Altitude, Position (when available) |
+| MSG,4 | Airborne Velocity | Ground Speed, Track, Vertical Rate |
+| MSG,5 | Surveillance | Altitude, Squawk Code |
 
-1. **Basic ADS-B Demodulation**: The current ADS-B demodulation is very basic and may not detect all messages correctly.
-
-2. **No Proper Preamble Detection**: The implementation lacks sophisticated ADS-B preamble detection and framing.
-
-3. **Limited Message Processing**: Only basic Beast mode message processing is implemented.
-
-4. **No Position Decoding**: CPR (Compact Position Reporting) decoding is not fully implemented.
-
-## How It Works
+## How It Works (dump1090-style)
 
 1. **RTL-SDR Capture**: Captures I/Q samples at 2 MHz sample rate on 1090 MHz
 2. **Envelope Detection**: Converts I/Q samples to envelope (magnitude) data
-3. **Simple Demodulation**: Basic threshold-based bit detection
-4. **Beast Mode Processing**: Attempts to decode the demodulated data as Beast mode messages
-5. **SBS Conversion**: Converts valid messages to BaseStation format
-6. **Logging**: Writes output to rotating log files
+3. **Adaptive Thresholding**: Dynamically adjusts detection threshold based on signal levels
+4. **Preamble Detection**: Scans for the specific ADS-B preamble pattern (high at 0, 2, 7, 9 μs)
+5. **PPM Demodulation**: Uses Pulse Position Modulation to extract 112-bit messages
+6. **CRC Validation**: Validates each message using ADS-B CRC-24 polynomial (0xFFF409)
+7. **Message Parsing**: Extracts information based on Downlink Format and Type Code
+8. **SBS Output**: Converts to BaseStation format and outputs to stdout/files
+
+## Comparison with dump1090
+
+| Feature | dump1090 | go1090 | Status |
+|---------|----------|--------|--------|
+| RTL-SDR Support | ✅ | ✅ | Complete |
+| Preamble Detection | ✅ | ✅ | Complete |
+| PPM Demodulation | ✅ | ✅ | Complete |
+| CRC Validation | ✅ | ✅ | Complete |
+| Message Parsing | ✅ | ✅ | Basic |
+| SBS Output | ✅ | ✅ | Complete |
+| Position Decoding (CPR) | ✅ | ❌ | Not implemented |
+| Web Interface | ✅ | ❌ | Not implemented |
+| Network Clients | ✅ | ❌ | Not implemented |
+
+## Real ADS-B Reception
+
+With your RTL-SDR and ADS-B antenna connected:
+
+```bash
+# Start receiving ADS-B messages
+./go1090 --verbose
+
+# You should see output like:
+# MSG,1,1,1,A12345,1,2023/12/25,10:30:45.123,2023/12/25,10:30:45.123,UAL123,,,,,,,,,,,0
+# MSG,3,1,1,A12345,1,2023/12/25,10:30:46.456,2023/12/25,10:30:46.456,,35000,,,,,,,,,,,0
+```
+
+### Expected Performance
+
+With a good antenna setup, you should expect:
+- **Detection range**: 100-300+ km depending on antenna height and aircraft altitude
+- **Message rate**: 50-1000+ messages per minute in busy airspace
+- **Message types**: Aircraft identification, position, velocity, surveillance
 
 ## Troubleshooting
 
-### "no RTL-SDR devices found"
-- Ensure your RTL-SDR device is connected
-- Check that librtlsdr can detect the device: `rtl_test`
-- Try running with sudo (may be needed for device access)
+### No Messages Detected
+- **Check antenna connection**: Ensure antenna is properly connected to RTL-SDR
+- **Verify antenna tuning**: Should be tuned for 1090 MHz
+- **Adjust gain**: Try different gain settings (`--gain 20` to `--gain 50`)
+- **Check frequency**: Ensure using exactly 1090000000 Hz
+- **Test with rtl_test**: Verify RTL-SDR is working: `rtl_test`
+
+### Poor Reception
+- **Antenna placement**: Higher is better, avoid obstacles
+- **Antenna type**: Use a proper 1090 MHz ADS-B antenna
+- **Gain settings**: Too high can cause overload, too low misses weak signals
+- **Interference**: Move away from WiFi routers, computers, other electronics
 
 ### Build Errors
 - Ensure librtlsdr is properly installed
-- On macOS, make sure you're using the build script that sets proper CGO flags
+- On macOS, use the build script that sets proper CGO flags
 - Verify Go version compatibility (requires Go 1.21+)
 
-### No Messages Detected
-- The current implementation is basic and may miss many messages
-- Try adjusting the gain setting
-- Ensure you have a proper ADS-B antenna connected
-- Consider using established tools like dump1090 for comparison
+## Performance Tips
 
-## For Production Use
+1. **Optimal Gain**: Start with gain 40, adjust based on your environment
+2. **Antenna Height**: Higher antenna placement significantly improves range
+3. **Antenna Type**: Use a dedicated 1090 MHz antenna for best results
+4. **Ground Plane**: Ensure proper ground plane for antenna
+5. **Interference**: Keep away from strong RF sources
 
-For production ADS-B decoding, consider using established tools like:
-- **dump1090**: Well-established ADS-B decoder
-- **rtl_adsb**: Simple ADS-B decoder included with rtl-sdr
-- **readsb**: Modern fork of dump1090
+## Comparison with Other Tools
 
-This Go implementation serves as a learning tool and starting point for custom ADS-B processing applications.
+### Use go1090 when:
+- Learning ADS-B protocol implementation
+- Integrating ADS-B into Go applications
+- Customizing message processing
+- Educational purposes
+
+### Use dump1090 when:
+- Production ADS-B decoding
+- Need web interface
+- Feeding ADS-B networks
+- Maximum performance required
+
+## Future Enhancements
+
+Planned improvements:
+- [ ] CPR position decoding
+- [ ] Web interface
+- [ ] Network client support
+- [ ] Beast mode output
+- [ ] JSON output format
+- [ ] Statistics web page
 
 ## License
 

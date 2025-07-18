@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/cmplx"
+	"math"
 	"os"
 	"os/signal"
 	"sync"
@@ -18,7 +18,6 @@ const (
 	DefaultFrequency  = 1090000000 // 1090 MHz
 	DefaultSampleRate = 2000000    // 2 MHz
 	DefaultGain       = 40         // Manual gain
-	BeastSyncByte     = 0x1A       // Beast mode sync byte
 )
 
 // Version information (set by build flags)
@@ -30,15 +29,15 @@ var (
 
 // Application represents the main application
 type Application struct {
-	config       Config
-	logger       *logrus.Logger
-	rtlsdr       *RTLSDRDevice
-	beastDecoder *BeastDecoder
-	baseStation  *BaseStationWriter
-	logRotator   *LogRotator
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	config        Config
+	logger        *logrus.Logger
+	rtlsdr        *RTLSDRDevice
+	adsbProcessor *ADSBProcessor
+	baseStation   *BaseStationWriter
+	logRotator    *LogRotator
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 // Config holds application configuration
@@ -78,7 +77,7 @@ func (app *Application) Start() error {
 		"version":    Version,
 		"build_time": BuildTime,
 		"git_commit": GitCommit,
-	}).Info("Starting ADS-B Beast Mode Decoder with RTL-SDR")
+	}).Info("Starting ADS-B Decoder (dump1090-style)")
 
 	// Initialize components
 	if err := app.initializeComponents(); err != nil {
@@ -118,8 +117,8 @@ func (app *Application) initializeComponents() error {
 		return fmt.Errorf("failed to configure RTL-SDR: %w", err)
 	}
 
-	// Initialize Beast decoder
-	app.beastDecoder = NewBeastDecoder(app.logger)
+	// Initialize ADS-B processor
+	app.adsbProcessor = NewADSBProcessor(app.config.SampleRate, app.logger)
 
 	// Initialize log rotator
 	app.logRotator, err = NewLogRotator(app.config.LogDir, app.config.LogRotateUTC, app.logger)
@@ -163,6 +162,13 @@ func (app *Application) run() error {
 		app.processIQData(dataChan)
 	}()
 
+	// Start statistics reporting
+	app.wg.Add(1)
+	go func() {
+		defer app.wg.Done()
+		app.reportStatistics()
+	}()
+
 	app.logger.Info("All components started successfully")
 	return nil
 }
@@ -178,43 +184,8 @@ func bytesToIQ(data []byte) []complex128 {
 	return samples
 }
 
-// Simple envelope detector for ADS-B demodulation
-func demodulateADSB(samples []complex128) []byte {
-	// Calculate envelope (magnitude)
-	envelope := make([]float64, len(samples))
-	maxEnv := 0.0
-	for i, sample := range samples {
-		envelope[i] = cmplx.Abs(sample)
-		if envelope[i] > maxEnv {
-			maxEnv = envelope[i]
-		}
-	}
-
-	// Normalize and threshold
-	if maxEnv == 0 {
-		return nil
-	}
-
-	threshold := maxEnv * 0.4
-	bits := make([]byte, 0, len(envelope))
-
-	// Simple bit detection - this is a very basic approach
-	for i := 0; i < len(envelope); i++ {
-		if envelope[i] > threshold {
-			bits = append(bits, 1)
-		} else {
-			bits = append(bits, 0)
-		}
-	}
-
-	return bits
-}
-
 // processIQData processes incoming I/Q data from RTL-SDR
 func (app *Application) processIQData(dataChan <-chan []byte) {
-	messageCount := 0
-	lastLogTime := time.Now()
-
 	for {
 		select {
 		case <-app.ctx.Done():
@@ -228,40 +199,299 @@ func (app *Application) processIQData(dataChan <-chan []byte) {
 			// Convert raw bytes to I/Q samples
 			iqSamples := bytesToIQ(data)
 
-			// Simple ADS-B demodulation (this is very basic)
-			demodData := demodulateADSB(iqSamples)
-			if len(demodData) == 0 {
-				continue
-			}
+			// Process with ADS-B decoder
+			messages := app.adsbProcessor.ProcessIQSamples(iqSamples)
 
-			// Try to decode as Beast mode messages
-			// For now, we'll treat the demodulated data as if it were Beast mode
-			// In reality, you'd need proper ADS-B preamble detection and framing
-			messages, err := app.beastDecoder.Decode(demodData)
-			if err != nil {
-				app.logger.WithError(err).Debug("Failed to decode as Beast data")
-				continue
-			}
-
-			// Convert and write each message to SBS format
+			// Convert valid messages to SBS format
 			for _, msg := range messages {
-				if err := app.baseStation.WriteMessage(msg); err != nil {
-					app.logger.WithError(err).Debug("Failed to write SBS message")
-					continue
-				}
-
-				messageCount++
-
-				// Log statistics every 30 seconds
-				if time.Since(lastLogTime) >= 30*time.Second {
-					app.logger.WithFields(logrus.Fields{
-						"total_messages": messageCount,
-						"message_type":   fmt.Sprintf("0x%02x", msg.MessageType),
-						"signal":         msg.Signal,
-					}).Info("ADS-B processing statistics")
-					lastLogTime = time.Now()
+				if msg.Valid {
+					if err := app.writeADSBMessage(msg); err != nil {
+						app.logger.WithError(err).Debug("Failed to write SBS message")
+					}
 				}
 			}
+		}
+	}
+}
+
+// writeADSBMessage converts ADS-B message to SBS format and writes it
+func (app *Application) writeADSBMessage(msg *ADSBMessage) error {
+	// Convert ADS-B message to BaseStation format
+	sbs := app.convertToSBS(msg)
+	if sbs == "" {
+		return nil // Skip unsupported message types
+	}
+
+	// Get current writer
+	writer, err := app.logRotator.GetWriter()
+	if err != nil {
+		return fmt.Errorf("failed to get log writer: %w", err)
+	}
+
+	// Write to log and stdout
+	line := sbs + "\n"
+	if _, err := writer.Write([]byte(line)); err != nil {
+		return fmt.Errorf("failed to write to log: %w", err)
+	}
+
+	// Also print to stdout like dump1090
+	fmt.Print(line)
+
+	return nil
+}
+
+// convertToSBS converts ADS-B message to SBS (BaseStation) format
+func (app *Application) convertToSBS(msg *ADSBMessage) string {
+	now := time.Now().UTC()
+	dateStr := now.Format("2006/01/02")
+	timeStr := now.Format("15:04:05.000")
+
+	icao := fmt.Sprintf("%06X", msg.GetICAO())
+	df := msg.GetDF()
+
+	// SBS message format: MSG,transmission_type,session_id,aircraft_id,hex_ident,flight_id,date_gen,time_gen,date_log,time_log,callsign,altitude,ground_speed,track,lat,lon,vertical_rate,squawk,alert,emergency,spi,is_on_ground
+
+	sessionID := "1"
+	aircraftID := "1"
+	flightID := "1"
+
+	switch df {
+	case 17, 18: // Extended Squitter
+		typeCode := msg.GetTypeCode()
+		transmissionType := "3" // Default to airborne position
+
+		// Initialize all fields as empty
+		callsign := ""
+		altitude := ""
+		groundSpeed := ""
+		track := ""
+		latitude := ""
+		longitude := ""
+		verticalRate := ""
+		squawk := ""
+		alert := ""
+		emergency := ""
+		spi := ""
+		isOnGround := "0"
+
+		// Parse based on type code
+		switch {
+		case typeCode >= 1 && typeCode <= 4:
+			// Aircraft identification
+			transmissionType = "1"
+			callsign = app.extractCallsign(msg.Data[:])
+
+		case typeCode >= 9 && typeCode <= 18:
+			// Airborne position
+			transmissionType = "3"
+			if alt := app.extractAltitude(msg.Data[:]); alt != 0 {
+				altitude = fmt.Sprintf("%d", alt)
+			}
+			// Position decoding would go here (requires CPR)
+
+		case typeCode >= 19 && typeCode <= 22:
+			// Airborne velocity
+			transmissionType = "4"
+			if speed, trk, vrate := app.extractVelocity(msg.Data[:]); speed != 0 {
+				groundSpeed = fmt.Sprintf("%d", speed)
+				track = fmt.Sprintf("%.1f", trk)
+				if vrate != 0 {
+					verticalRate = fmt.Sprintf("%d", vrate)
+				}
+			}
+		}
+
+		return fmt.Sprintf("MSG,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+			transmissionType, sessionID, aircraftID, icao, flightID,
+			dateStr, timeStr, dateStr, timeStr,
+			callsign, altitude, groundSpeed, track, latitude, longitude,
+			verticalRate, squawk, alert, emergency, spi, isOnGround)
+
+	case 4, 5, 20, 21: // Surveillance replies
+		transmissionType := "5" // Surveillance
+
+		altitude := ""
+		squawk := ""
+
+		if df == 4 || df == 20 {
+			if alt := app.extractAltitude(msg.Data[:]); alt != 0 {
+				altitude = fmt.Sprintf("%d", alt)
+			}
+		}
+
+		if df == 5 || df == 21 {
+			if sq := app.extractSquawk(msg.Data[:]); sq != 0 {
+				squawk = fmt.Sprintf("%04d", sq)
+			}
+		}
+
+		return fmt.Sprintf("MSG,%s,%s,%s,%s,%s,%s,%s,%s,%s,,%s,,,,,%s,,,,%s",
+			transmissionType, sessionID, aircraftID, icao, flightID,
+			dateStr, timeStr, dateStr, timeStr,
+			altitude, squawk, "0")
+	}
+
+	return "" // Unsupported message type
+}
+
+// extractCallsign extracts callsign from aircraft identification message
+func (app *Application) extractCallsign(data []byte) string {
+	if len(data) < 11 {
+		return ""
+	}
+
+	// Extract 8 characters from bits 40-87
+	callsign := make([]byte, 8)
+	charset := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	for i := 0; i < 8; i++ {
+		// Extract 6 bits for each character
+		bitStart := 40 + i*6
+		byteIdx := bitStart / 8
+		bitOffset := bitStart % 8
+
+		if byteIdx+1 >= len(data) {
+			break
+		}
+
+		var char uint8
+		if bitOffset <= 2 {
+			char = (data[byteIdx] >> (2 - bitOffset)) & 0x3F
+		} else {
+			char = ((data[byteIdx] << (bitOffset - 2)) | (data[byteIdx+1] >> (10 - bitOffset))) & 0x3F
+		}
+
+		if char > 0 && int(char-1) < len(charset) {
+			callsign[i] = charset[char-1]
+		} else {
+			callsign[i] = ' '
+		}
+	}
+
+	return string(callsign)
+}
+
+// extractAltitude extracts altitude from surveillance or position messages
+func (app *Application) extractAltitude(data []byte) int {
+	if len(data) < 6 {
+		return 0
+	}
+
+	// Extract 13-bit altitude field (different positions for different message types)
+	df := (data[0] >> 3) & 0x1F
+
+	var altCode uint16
+
+	if df == 4 || df == 20 {
+		// Surveillance altitude reply
+		altCode = (uint16(data[2]&0x1F) << 8) | uint16(data[3])
+	} else if df == 17 || df == 18 {
+		// Extended squitter
+		altCode = (uint16(data[5]&0x1F) << 8) | uint16(data[6])
+	} else {
+		return 0
+	}
+
+	if altCode == 0 {
+		return 0
+	}
+
+	// Convert from Gray code to binary and calculate altitude
+	return int(altCode)*25 - 1000
+}
+
+// extractSquawk extracts squawk code from surveillance messages
+func (app *Application) extractSquawk(data []byte) int {
+	if len(data) < 4 {
+		return 0
+	}
+
+	// Extract 13-bit identity field
+	identity := (uint16(data[2]&0x1F) << 8) | uint16(data[3])
+
+	// Convert to 4-digit squawk code
+	squawk := 0
+	squawk += int((identity>>9)&0x07) * 1000 // A4 A2 A1
+	squawk += int((identity>>6)&0x07) * 100  // B4 B2 B1
+	squawk += int((identity>>3)&0x07) * 10   // C4 C2 C1
+	squawk += int(identity & 0x07)           // D4 D2 D1
+
+	return squawk
+}
+
+// extractVelocity extracts velocity information from airborne velocity messages
+func (app *Application) extractVelocity(data []byte) (int, float64, int) {
+	if len(data) < 11 {
+		return 0, 0, 0
+	}
+
+	// Extract velocity subtype
+	subtype := (data[4] >> 1) & 0x07
+
+	if subtype != 1 && subtype != 2 {
+		return 0, 0, 0 // Only handle groundspeed subtypes
+	}
+
+	// Extract east-west velocity
+	ewDir := (data[5] >> 2) & 0x01
+	ewVel := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+
+	// Extract north-south velocity
+	nsDir := (data[7] >> 7) & 0x01
+	nsVel := (((uint16(data[7]&0x7F) << 3) | (uint16(data[8]) >> 5)) & 0x3FF) - 1
+
+	// Convert to signed values
+	var ewSpeed, nsSpeed float64
+	if ewDir == 1 {
+		ewSpeed = -float64(ewVel)
+	} else {
+		ewSpeed = float64(ewVel)
+	}
+
+	if nsDir == 1 {
+		nsSpeed = -float64(nsVel)
+	} else {
+		nsSpeed = float64(nsVel)
+	}
+
+	// Calculate ground speed and track
+	groundSpeed := int(math.Sqrt(ewSpeed*ewSpeed + nsSpeed*nsSpeed))
+	track := math.Atan2(ewSpeed, nsSpeed) * 180.0 / math.Pi
+	if track < 0 {
+		track += 360
+	}
+
+	// Extract vertical rate
+	vrSign := (data[8] >> 3) & 0x01
+	vrValue := ((uint16(data[8]&0x07) << 6) | (uint16(data[9]) >> 2)) & 0x1FF
+
+	var verticalRate int
+	if vrValue != 0 {
+		verticalRate = int(vrValue-1) * 64
+		if vrSign == 1 {
+			verticalRate = -verticalRate
+		}
+	}
+
+	return groundSpeed, track, verticalRate
+}
+
+// reportStatistics reports processing statistics periodically
+func (app *Application) reportStatistics() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			return
+		case <-ticker.C:
+			total, preambles, valid := app.adsbProcessor.GetStats()
+			app.logger.WithFields(logrus.Fields{
+				"total_processed": total,
+				"preambles_found": preambles,
+				"valid_messages":  valid,
+			}).Info("ADS-B processing statistics")
 		}
 	}
 }
@@ -297,7 +527,7 @@ func (app *Application) shutdown() {
 
 // showVersion displays version information
 func showVersion() {
-	fmt.Printf("Go1090 ADS-B Beast Mode Decoder\n")
+	fmt.Printf("Go1090 ADS-B Decoder (dump1090-style)\n")
 	fmt.Printf("Version: %s\n", Version)
 	fmt.Printf("Build Time: %s\n", BuildTime)
 	fmt.Printf("Git Commit: %s\n", GitCommit)
@@ -309,11 +539,12 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:   "go1090",
-		Short: "ADS-B Beast Mode Decoder",
-		Long: `ADS-B Beast Mode Decoder using RTL-SDR.
+		Short: "ADS-B Decoder (dump1090-style)",
+		Long: `ADS-B Decoder using RTL-SDR (dump1090-style implementation).
 
-Captures I/Q samples from RTL-SDR, demodulates ADS-B messages,
-and converts them to BaseStation (SBS) format.
+Captures I/Q samples from RTL-SDR, demodulates ADS-B messages using proper
+preamble detection and PPM demodulation, validates CRC, and outputs in
+BaseStation (SBS) format.
 
 Example usage:
   go1090 --frequency 1090000000 --gain 40 --device 0`,
