@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/cmplx"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -18,6 +19,10 @@ type ADSBProcessor struct {
 	validMessages   uint64
 	rejectedBad     uint64
 	rejectedUnknown uint64
+
+	// Aircraft tracking for CPR decoding
+	aircraft map[uint32]*AircraftState
+	mu       sync.RWMutex
 }
 
 // ADSBMessage represents a decoded ADS-B message
@@ -31,11 +36,34 @@ type ADSBMessage struct {
 	Phase     int
 }
 
+// AircraftState tracks position data for CPR decoding
+type AircraftState struct {
+	ICAO    uint32
+	EvenCPR *CPRFrame
+	OddCPR  *CPRFrame
+	LastPos *Position
+	Updated time.Time
+}
+
+// CPRFrame represents a CPR encoded position frame
+type CPRFrame struct {
+	LatCPR    uint32
+	LonCPR    uint32
+	Timestamp time.Time
+}
+
+// Position represents decoded lat/lon coordinates
+type Position struct {
+	Latitude  float64
+	Longitude float64
+}
+
 // NewADSBProcessor creates a new ADS-B processor
 func NewADSBProcessor(sampleRate uint32, logger *logrus.Logger) *ADSBProcessor {
 	return &ADSBProcessor{
 		logger:     logger,
 		sampleRate: sampleRate,
+		aircraft:   make(map[uint32]*AircraftState),
 	}
 }
 
