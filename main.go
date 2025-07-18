@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultFrequency  = 1090000000 // 1090 MHz
-	DefaultSampleRate = 2000000    // 2 MHz
+	DefaultSampleRate = 2400000    // 2.4 MHz (same as dump1090)
 	DefaultGain       = 40         // Manual gain
 )
 
@@ -186,6 +186,9 @@ func bytesToIQ(data []byte) []complex128 {
 
 // processIQData processes incoming I/Q data from RTL-SDR
 func (app *Application) processIQData(dataChan <-chan []byte) {
+	sampleCount := 0
+	dataPackets := 0
+
 	for {
 		select {
 		case <-app.ctx.Done():
@@ -196,8 +199,29 @@ func (app *Application) processIQData(dataChan <-chan []byte) {
 				continue
 			}
 
+			dataPackets++
+			sampleCount += len(data) / 2 // I/Q pairs
+
+			// Log periodic statistics
+			if dataPackets%100 == 0 {
+				app.logger.WithFields(logrus.Fields{
+					"packets":   dataPackets,
+					"samples":   sampleCount,
+					"data_size": len(data),
+				}).Debug("I/Q data stats")
+			}
+
 			// Convert raw bytes to I/Q samples
 			iqSamples := bytesToIQ(data)
+
+			// Log first few samples for debugging
+			if dataPackets <= 3 {
+				app.logger.WithFields(logrus.Fields{
+					"packet":       dataPackets,
+					"iq_samples":   len(iqSamples),
+					"first_sample": iqSamples[0],
+				}).Debug("Sample data")
+			}
 
 			// Process with ADS-B decoder
 			messages := app.adsbProcessor.ProcessIQSamples(iqSamples)
@@ -542,12 +566,12 @@ func main() {
 		Short: "ADS-B Decoder (dump1090-style)",
 		Long: `ADS-B Decoder using RTL-SDR (dump1090-style implementation).
 
-Captures I/Q samples from RTL-SDR, demodulates ADS-B messages using proper
-preamble detection and PPM demodulation, validates CRC, and outputs in
-BaseStation (SBS) format.
+Captures I/Q samples from RTL-SDR at 2.4MHz, demodulates ADS-B messages using 
+dump1090's correlation-based approach with proper phase tracking and scoring,
+validates CRC, and outputs in BaseStation (SBS) format.
 
 Example usage:
-  go1090 --frequency 1090000000 --gain 40 --device 0`,
+  go1090 --frequency 1090000000 --sample-rate 2400000 --gain 40 --device 0`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if config.ShowVersion {
 				showVersion()
