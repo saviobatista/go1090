@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,6 +39,7 @@ type Application struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	verbose       bool
 }
 
 // Config holds application configuration
@@ -64,10 +66,11 @@ func NewApplication(config Config) *Application {
 	}
 
 	return &Application{
-		config: config,
-		logger: logger,
-		ctx:    ctx,
-		cancel: cancel,
+		config:  config,
+		logger:  logger,
+		ctx:     ctx,
+		cancel:  cancel,
+		verbose: config.Verbose,
 	}
 }
 
@@ -364,35 +367,56 @@ func (app *Application) extractCallsign(data []byte) string {
 		return ""
 	}
 
-	// Extract 8 characters from bits 40-87
+	// Debug: print the raw data for analysis
+	if app.verbose {
+		app.logger.Debugf("Callsign raw data: %x", data[:11])
+	}
+
+	// Callsign is in bits 40-87 (8 characters, 6 bits each)
+	// ADS-B uses a specific 6-bit character set: space, A-Z, 0-9
+	charset := "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?"
 	callsign := make([]byte, 8)
-	charset := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 	for i := 0; i < 8; i++ {
-		// Extract 6 bits for each character
+		// Calculate bit position: start at bit 40, each character is 6 bits
 		bitStart := 40 + i*6
 		byteIdx := bitStart / 8
 		bitOffset := bitStart % 8
 
-		if byteIdx+1 >= len(data) {
+		if byteIdx >= len(data) {
 			break
 		}
 
 		var char uint8
 		if bitOffset <= 2 {
+			// Character fits in single byte
 			char = (data[byteIdx] >> (2 - bitOffset)) & 0x3F
 		} else {
+			// Character spans two bytes
+			if byteIdx+1 >= len(data) {
+				break
+			}
 			char = ((data[byteIdx] << (bitOffset - 2)) | (data[byteIdx+1] >> (10 - bitOffset))) & 0x3F
 		}
 
-		if char > 0 && int(char-1) < len(charset) {
-			callsign[i] = charset[char-1]
+		// Debug individual characters
+		if app.verbose {
+			app.logger.Debugf("Char %d: raw=0x%02x (%d)", i, char, char)
+		}
+
+		// Convert using ADS-B 6-bit character set
+		if char < uint8(len(charset)) {
+			callsign[i] = charset[char]
 		} else {
-			callsign[i] = ' '
+			callsign[i] = '?'
 		}
 	}
 
-	return string(callsign)
+	result := strings.TrimSpace(string(callsign))
+	if app.verbose {
+		app.logger.Debugf("Extracted callsign: '%s'", result)
+	}
+	return result
 }
 
 // extractAltitude extracts altitude from surveillance or position messages
