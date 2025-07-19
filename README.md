@@ -57,24 +57,42 @@ This implementation now works **just like dump1090**:
 
 ## Building
 
-### macOS
+### Simple Build (Recommended)
+
+The project uses a Makefile that automatically handles all dependencies and CGO configuration:
+
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd go1090
 
-# Use the provided build script
-./build.sh
+# Build the project (automatically detects librtlsdr and sets CGO flags)
+make build
 ```
 
-### Linux
-```bash
-# Clone the repository
-git clone <repository-url>
-cd go1090
+This will:
+- ✅ Automatically detect your OS and architecture
+- ✅ Find librtlsdr installation using pkg-config or common paths
+- ✅ Set proper CGO flags automatically
+- ✅ Provide clear error messages if librtlsdr is missing
 
-# Build with standard go build
-go build .
+### Alternative Build Methods
+
+#### Using Go directly (requires manual CGO flags)
+```bash
+# macOS (Apple Silicon)
+CGO_CFLAGS="-I/opt/homebrew/include" CGO_LDFLAGS="-L/opt/homebrew/lib" go build .
+
+# macOS (Intel)
+CGO_CFLAGS="-I/usr/local/include" CGO_LDFLAGS="-L/usr/local/lib" go build .
+
+# Linux
+CGO_CFLAGS="-I/usr/local/include" CGO_LDFLAGS="-L/usr/local/lib" go build .
+```
+
+#### Check dependencies only
+```bash
+make check-deps
 ```
 
 ## Usage
@@ -176,23 +194,69 @@ With a good antenna setup, you should expect:
 
 ## Troubleshooting
 
-### No Messages Detected
+### Build Issues
+
+#### librtlsdr Not Found
+If you get errors like `'rtl-sdr.h' file not found`:
+
+1. **Install librtlsdr**:
+   ```bash
+   # macOS
+   brew install librtlsdr
+   
+   # Ubuntu/Debian
+   sudo apt-get install librtlsdr-dev pkg-config
+   
+   # CentOS/RHEL/Fedora
+   sudo yum install rtl-sdr-devel pkgconfig
+   ```
+
+2. **Check installation**:
+   ```bash
+   # Verify pkg-config can find librtlsdr
+   pkg-config --exists librtlsdr && echo "Found" || echo "Not found"
+   
+   # Check common installation paths
+   ls /opt/homebrew/include/rtl-sdr.h 2>/dev/null || echo "Not in /opt/homebrew"
+   ls /usr/local/include/rtl-sdr.h 2>/dev/null || echo "Not in /usr/local"
+   ls /usr/include/rtl-sdr.h 2>/dev/null || echo "Not in /usr"
+   ```
+
+3. **Try building again**:
+   ```bash
+   make build
+   ```
+
+#### CGO Issues
+- Ensure CGO is enabled: `export CGO_ENABLED=1`
+- On macOS, you may need Xcode command line tools: `xcode-select --install`
+- On Linux, ensure you have build essentials: `sudo apt-get install build-essential`
+
+#### Go Version Issues
+- Requires Go 1.21 or later
+- Check version: `go version`
+- Update if needed: `go install golang.org/dl/go1.21@latest`
+
+### Runtime Issues
+
+#### No Messages Detected
 - **Check antenna connection**: Ensure antenna is properly connected to RTL-SDR
 - **Verify antenna tuning**: Should be tuned for 1090 MHz
 - **Adjust gain**: Try different gain settings (`--gain 20` to `--gain 50`)
 - **Check frequency**: Ensure using exactly 1090000000 Hz
 - **Test with rtl_test**: Verify RTL-SDR is working: `rtl_test`
 
-### Poor Reception
+#### Poor Reception
 - **Antenna placement**: Higher is better, avoid obstacles
 - **Antenna type**: Use a proper 1090 MHz ADS-B antenna
 - **Gain settings**: Too high can cause overload, too low misses weak signals
 - **Interference**: Move away from WiFi routers, computers, other electronics
 
-### Build Errors
-- Ensure librtlsdr is properly installed
-- On macOS, use the build script that sets proper CGO flags
-- Verify Go version compatibility (requires Go 1.21+)
+#### RTL-SDR Device Issues
+- **Check device permissions**: On Linux, you may need to add user to `plugdev` group
+- **Verify device detection**: `lsusb | grep RTL`
+- **Test device**: `rtl_test -t`
+- **Check device index**: Use `--device 0` or `--device 1` if multiple devices
 
 ## Performance Tips
 
