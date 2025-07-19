@@ -27,11 +27,13 @@ This implementation now works **just like dump1090**:
 ### macOS (Apple Silicon/Intel)
 
 1. **Install Homebrew** (if not already installed):
+
    ```bash
    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
    ```
 
 2. **Install librtlsdr**:
+
    ```bash
    brew install librtlsdr
    ```
@@ -44,6 +46,7 @@ This implementation now works **just like dump1090**:
 ### Linux
 
 1. **Install librtlsdr development package**:
+
    ```bash
    # Ubuntu/Debian
    sudo apt-get update
@@ -57,29 +60,51 @@ This implementation now works **just like dump1090**:
 
 ## Building
 
-### macOS
+### Simple Build (Recommended)
+
+The project uses a Makefile that automatically handles all dependencies and CGO configuration:
+
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd go1090
 
-# Use the provided build script
-./build.sh
+# Build the project (automatically detects librtlsdr and sets CGO flags)
+make build
 ```
 
-### Linux
-```bash
-# Clone the repository
-git clone <repository-url>
-cd go1090
+This will:
 
-# Build with standard go build
-go build .
+- ✅ Automatically detect your OS and architecture
+- ✅ Find librtlsdr installation using pkg-config or common paths
+- ✅ Set proper CGO flags automatically
+- ✅ Provide clear error messages if librtlsdr is missing
+
+### Alternative Build Methods
+
+#### Using Go directly (requires manual CGO flags)
+
+```bash
+# macOS (Apple Silicon)
+CGO_CFLAGS="-I/opt/homebrew/include" CGO_LDFLAGS="-L/opt/homebrew/lib" go build .
+
+# macOS (Intel)
+CGO_CFLAGS="-I/usr/local/include" CGO_LDFLAGS="-L/usr/local/lib" go build .
+
+# Linux
+CGO_CFLAGS="-I/usr/local/include" CGO_LDFLAGS="-L/usr/local/lib" go build .
+```
+
+#### Check dependencies only
+
+```bash
+make check-deps
 ```
 
 ## Usage
 
 ### Basic Usage
+
 ```bash
 # Use default settings (1090 MHz, manual gain 40)
 ./go1090
@@ -96,24 +121,26 @@ go build .
 
 ### Command Line Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-f, --frequency` | 1090000000 | Frequency to tune to (Hz) |
-| `-s, --sample-rate` | 2000000 | Sample rate (Hz) |
-| `-g, --gain` | 40 | Gain setting (0 for auto) |
-| `-d, --device` | 0 | RTL-SDR device index |
-| `-l, --log-dir` | ./logs | Log directory |
-| `-u, --utc` | true | Use UTC for log rotation |
-| `-v, --verbose` | false | Verbose logging |
-| `--version` | false | Show version information |
+| Flag                | Default    | Description               |
+| ------------------- | ---------- | ------------------------- |
+| `-f, --frequency`   | 1090000000 | Frequency to tune to (Hz) |
+| `-s, --sample-rate` | 2000000    | Sample rate (Hz)          |
+| `-g, --gain`        | 40         | Gain setting (0 for auto) |
+| `-d, --device`      | 0          | RTL-SDR device index      |
+| `-l, --log-dir`     | ./logs     | Log directory             |
+| `-u, --utc`         | true       | Use UTC for log rotation  |
+| `-v, --verbose`     | false      | Verbose logging           |
+| `--version`         | false      | Show version information  |
 
 ## Output Format
 
 The tool outputs messages in BaseStation (SBS) format, which is compatible with many ADS-B applications. Messages are both:
+
 - **Printed to stdout** (like dump1090)
 - **Logged to files** with automatic rotation
 
 Example SBS output:
+
 ```
 MSG,1,1,1,4CA2B6,1,2023/12/25,10:30:45.123,2023/12/25,10:30:45.123,UAL123,,,,,,,,,,,0
 MSG,3,1,1,4CA2B6,1,2023/12/25,10:30:46.456,2023/12/25,10:30:46.456,,35000,,,,,,,,,,,0
@@ -122,12 +149,12 @@ MSG,4,1,1,4CA2B6,1,2023/12/25,10:30:47.789,2023/12/25,10:30:47.789,,,450,180.5,,
 
 ### Message Types
 
-| Type | Description | Fields |
-|------|-------------|--------|
-| MSG,1 | Aircraft Identification | Callsign |
-| MSG,3 | Airborne Position | Altitude, Position (when available) |
-| MSG,4 | Airborne Velocity | Ground Speed, Track, Vertical Rate |
-| MSG,5 | Surveillance | Altitude, Squawk Code |
+| Type  | Description             | Fields                              |
+| ----- | ----------------------- | ----------------------------------- |
+| MSG,1 | Aircraft Identification | Callsign                            |
+| MSG,3 | Airborne Position       | Altitude, Position (when available) |
+| MSG,4 | Airborne Velocity       | Ground Speed, Track, Vertical Rate  |
+| MSG,5 | Surveillance            | Altitude, Squawk Code               |
 
 ## How It Works (dump1090-style)
 
@@ -142,17 +169,17 @@ MSG,4,1,1,4CA2B6,1,2023/12/25,10:30:47.789,2023/12/25,10:30:47.789,,,450,180.5,,
 
 ## Comparison with dump1090
 
-| Feature | dump1090 | go1090 | Status |
-|---------|----------|--------|--------|
-| RTL-SDR Support | ✅ | ✅ | Complete |
-| Preamble Detection | ✅ | ✅ | Complete |
-| PPM Demodulation | ✅ | ✅ | Complete |
-| CRC Validation | ✅ | ✅ | Complete |
-| Message Parsing | ✅ | ✅ | Basic |
-| SBS Output | ✅ | ✅ | Complete |
-| Position Decoding (CPR) | ✅ | ❌ | Not implemented |
-| Web Interface | ✅ | ❌ | Not implemented |
-| Network Clients | ✅ | ❌ | Not implemented |
+| Feature                 | dump1090 | go1090 | Status          |
+| ----------------------- | -------- | ------ | --------------- |
+| RTL-SDR Support         | ✅       | ✅     | Complete        |
+| Preamble Detection      | ✅       | ✅     | Complete        |
+| PPM Demodulation        | ✅       | ✅     | Complete        |
+| CRC Validation          | ✅       | ✅     | Complete        |
+| Message Parsing         | ✅       | ✅     | Basic           |
+| SBS Output              | ✅       | ✅     | Complete        |
+| Position Decoding (CPR) | ✅       | ❌     | Not implemented |
+| Web Interface           | ✅       | ❌     | Not implemented |
+| Network Clients         | ✅       | ❌     | Not implemented |
 
 ## Real ADS-B Reception
 
@@ -170,29 +197,84 @@ With your RTL-SDR and ADS-B antenna connected:
 ### Expected Performance
 
 With a good antenna setup, you should expect:
+
 - **Detection range**: 100-300+ km depending on antenna height and aircraft altitude
 - **Message rate**: 50-1000+ messages per minute in busy airspace
 - **Message types**: Aircraft identification, position, velocity, surveillance
 
 ## Troubleshooting
 
-### No Messages Detected
+### Build Issues
+
+#### librtlsdr Not Found
+
+If you get errors like `'rtl-sdr.h' file not found`:
+
+1. **Install librtlsdr**:
+
+   ```bash
+   # macOS
+   brew install librtlsdr
+
+   # Ubuntu/Debian
+   sudo apt-get install librtlsdr-dev pkg-config
+
+   # CentOS/RHEL/Fedora
+   sudo yum install rtl-sdr-devel pkgconfig
+   ```
+
+2. **Check installation**:
+
+   ```bash
+   # Verify pkg-config can find librtlsdr
+   pkg-config --exists librtlsdr && echo "Found" || echo "Not found"
+
+   # Check common installation paths
+   ls /opt/homebrew/include/rtl-sdr.h 2>/dev/null || echo "Not in /opt/homebrew"
+   ls /usr/local/include/rtl-sdr.h 2>/dev/null || echo "Not in /usr/local"
+   ls /usr/include/rtl-sdr.h 2>/dev/null || echo "Not in /usr"
+   ```
+
+3. **Try building again**:
+   ```bash
+   make build
+   ```
+
+#### CGO Issues
+
+- Ensure CGO is enabled: `export CGO_ENABLED=1`
+- On macOS, you may need Xcode command line tools: `xcode-select --install`
+- On Linux, ensure you have build essentials: `sudo apt-get install build-essential`
+
+#### Go Version Issues
+
+- Requires Go 1.21 or later
+- Check version: `go version`
+- Update if needed: `go install golang.org/dl/go1.21@latest`
+
+### Runtime Issues
+
+#### No Messages Detected
+
 - **Check antenna connection**: Ensure antenna is properly connected to RTL-SDR
 - **Verify antenna tuning**: Should be tuned for 1090 MHz
 - **Adjust gain**: Try different gain settings (`--gain 20` to `--gain 50`)
 - **Check frequency**: Ensure using exactly 1090000000 Hz
 - **Test with rtl_test**: Verify RTL-SDR is working: `rtl_test`
 
-### Poor Reception
+#### Poor Reception
+
 - **Antenna placement**: Higher is better, avoid obstacles
 - **Antenna type**: Use a proper 1090 MHz ADS-B antenna
 - **Gain settings**: Too high can cause overload, too low misses weak signals
 - **Interference**: Move away from WiFi routers, computers, other electronics
 
-### Build Errors
-- Ensure librtlsdr is properly installed
-- On macOS, use the build script that sets proper CGO flags
-- Verify Go version compatibility (requires Go 1.21+)
+#### RTL-SDR Device Issues
+
+- **Check device permissions**: On Linux, you may need to add user to `plugdev` group
+- **Verify device detection**: `lsusb | grep RTL`
+- **Test device**: `rtl_test -t`
+- **Check device index**: Use `--device 0` or `--device 1` if multiple devices
 
 ## Performance Tips
 
@@ -205,12 +287,14 @@ With a good antenna setup, you should expect:
 ## Comparison with Other Tools
 
 ### Use go1090 when:
+
 - Learning ADS-B protocol implementation
 - Integrating ADS-B into Go applications
 - Customizing message processing
 - Educational purposes
 
 ### Use dump1090 when:
+
 - Production ADS-B decoding
 - Need web interface
 - Feeding ADS-B networks
@@ -219,6 +303,7 @@ With a good antenna setup, you should expect:
 ## Future Enhancements
 
 Planned improvements:
+
 - [ ] CPR position decoding
 - [ ] Web interface
 - [ ] Network client support
@@ -228,4 +313,4 @@ Planned improvements:
 
 ## License
 
-This project is provided as-is for educational and experimental purposes. 
+This project is provided as-is for educational and experimental purposes.

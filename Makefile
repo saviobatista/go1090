@@ -45,16 +45,47 @@ deps: ## Download and install dependencies
 	$(GOMOD) download
 	$(GOMOD) tidy
 
+# Function to get CGO flags
+define get_cgo_flags
+	$(shell if pkg-config --exists librtlsdr 2>/dev/null; then \
+		echo "CGO_CFLAGS=\"$$(pkg-config --cflags librtlsdr)\" CGO_LDFLAGS=\"$$(pkg-config --libs librtlsdr)\""; \
+	elif [ -f "/opt/homebrew/include/rtl-sdr.h" ]; then \
+		echo "CGO_CFLAGS=\"-I/opt/homebrew/include\" CGO_LDFLAGS=\"-L/opt/homebrew/lib\""; \
+	elif [ -f "/usr/local/include/rtl-sdr.h" ]; then \
+		echo "CGO_CFLAGS=\"-I/usr/local/include\" CGO_LDFLAGS=\"-L/usr/local/lib\""; \
+	elif [ -f "/usr/include/rtl-sdr.h" ]; then \
+		echo "CGO_CFLAGS=\"-I/usr/include\" CGO_LDFLAGS=\"-L/usr/lib\""; \
+	else \
+		echo ""; \
+	fi)
+endef
+
 check-deps: ## Check if required dependencies are installed
 	@echo "Checking dependencies..."
 	@which pkg-config >/dev/null || (echo "ERROR: pkg-config not found. Install it first." && exit 1)
-	@pkg-config --exists librtlsdr || (echo "ERROR: librtlsdr not found. Install librtlsdr-dev/librtlsdr." && exit 1)
-	@echo "✅ All dependencies found"
+	@echo "Checking for librtlsdr..."
+	@if pkg-config --exists librtlsdr; then \
+		echo "✅ Found librtlsdr via pkg-config"; \
+	elif [ -f "/opt/homebrew/include/rtl-sdr.h" ]; then \
+		echo "✅ Found librtlsdr at /opt/homebrew (Apple Silicon)"; \
+	elif [ -f "/usr/local/include/rtl-sdr.h" ]; then \
+		echo "✅ Found librtlsdr at /usr/local (Intel Homebrew/Linux)"; \
+	elif [ -f "/usr/include/rtl-sdr.h" ]; then \
+		echo "✅ Found librtlsdr at /usr (system installation)"; \
+	else \
+		echo "❌ ERROR: librtlsdr not found!"; \
+		echo "Please install librtlsdr:"; \
+		echo "  macOS: brew install librtlsdr"; \
+		echo "  Ubuntu/Debian: sudo apt-get install librtlsdr-dev pkg-config"; \
+		echo "  CentOS/RHEL/Fedora: sudo yum install rtl-sdr-devel pkgconfig"; \
+		exit 1; \
+	fi
+	@echo "CGO flags will be set automatically during build"
 
 # Building
 build: check-deps ## Build the binary for current platform
 	@echo "Building $(BINARY_NAME) v$(VERSION)..."
-	$(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_NAME) .
+	$(call get_cgo_flags) $(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_NAME) .
 	@echo "✅ Build complete: $(BINARY_NAME)"
 
 build-static: check-deps ## Build static binary (Linux only)
