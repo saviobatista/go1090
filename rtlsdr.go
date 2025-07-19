@@ -16,6 +16,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// Buffer size constants for RTL-SDR data capture
+const (
+	BufferChunkSize = 16384 // 16KB chunk size for RTL-SDR buffer
+)
+
 // RTLSDRDevice represents an RTL-SDR device
 type RTLSDRDevice struct {
 	device   *rtlsdr.Context
@@ -112,7 +117,7 @@ func (r *RTLSDRDevice) StartCapture(ctx context.Context, dataChan chan<- []byte)
 	r.cancelFn = cancel
 
 	// Buffer for reading data
-	bufLen := 16 * 16384 // 256KB buffer
+	bufLen := 16 * BufferChunkSize // 256KB buffer
 
 	// Callback function for async reads
 	callback := func(data []byte) {

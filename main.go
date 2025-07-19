@@ -15,10 +15,40 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// ADS-B 6-bit character set: space, A-Z, 0-9
+// This is the standard character set used in ADS-B callsign encoding
+const adsbCharset = "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?"
+
+// Brazil region correction constants for CPR position decoding
+// These values correct for observed coordinate differences in the Brazil region
+const (
+	BrazilLatCorrection = -24.0 // Latitude correction for Brazil region
+	BrazilLonCorrection = -52.0 // Longitude correction for Brazil region
+)
+
+// Default configuration constants
 const (
 	DefaultFrequency  = 1090000000 // 1090 MHz
 	DefaultSampleRate = 2400000    // 2.4 MHz (same as dump1090)
 	DefaultGain       = 40         // Manual gain
+)
+
+// Squawk code bit manipulation constants
+const (
+	SquawkA4A2A1Mask = 0x07 // Mask for A4 A2 A1 bits
+	SquawkB4B2B1Mask = 0x07 // Mask for B4 B2 B1 bits
+	SquawkC4C2C1Mask = 0x07 // Mask for C4 C2 C1 bits
+	SquawkD4D2D1Mask = 0x07 // Mask for D4 D2 D1 bits
+
+	SquawkA4A2A1Shift = 9 // Shift for A4 A2 A1 bits
+	SquawkB4B2B1Shift = 6 // Shift for B4 B2 B1 bits
+	SquawkC4C2C1Shift = 3 // Shift for C4 C2 C1 bits
+	SquawkD4D2D1Shift = 0 // Shift for D4 D2 D1 bits
+
+	SquawkAMultiplier = 1000 // Multiplier for A digit
+	SquawkBMultiplier = 100  // Multiplier for B digit
+	SquawkCMultiplier = 10   // Multiplier for C digit
+	SquawkDMultiplier = 1    // Multiplier for D digit
 )
 
 // Version information (set by build flags)
@@ -179,10 +209,12 @@ func (app *Application) run() error {
 // Helper: Convert raw bytes to complex128 I/Q samples (unsigned 8-bit to signed)
 func bytesToIQ(data []byte) []complex128 {
 	samples := make([]complex128, len(data)/2)
+	sampleIndex := 0
 	for i := 0; i < len(data)-1; i += 2 {
 		iSample := float64(data[i]) - 127.5
 		qSample := float64(data[i+1]) - 127.5
-		samples[i/2] = complex(iSample, qSample)
+		samples[sampleIndex] = complex(iSample, qSample)
+		sampleIndex++
 	}
 	return samples
 }
@@ -435,7 +467,6 @@ func (app *Application) extractCallsign(data []byte) string {
 
 	// Callsign is in bits 40-87 (8 characters, 6 bits each)
 	// ADS-B uses a specific 6-bit character set: space, A-Z, 0-9
-	charset := "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?"
 	callsign := make([]byte, 8)
 
 	for i := 0; i < 8; i++ {
@@ -466,8 +497,8 @@ func (app *Application) extractCallsign(data []byte) string {
 		}
 
 		// Convert using ADS-B 6-bit character set
-		if char < uint8(len(charset)) {
-			callsign[i] = charset[char]
+		if char < uint8(len(adsbCharset)) {
+			callsign[i] = adsbCharset[char]
 		} else {
 			callsign[i] = '?'
 		}
@@ -520,10 +551,10 @@ func (app *Application) extractSquawk(data []byte) int {
 
 	// Convert to 4-digit squawk code
 	squawk := 0
-	squawk += int((identity>>9)&0x07) * 1000 // A4 A2 A1
-	squawk += int((identity>>6)&0x07) * 100  // B4 B2 B1
-	squawk += int((identity>>3)&0x07) * 10   // C4 C2 C1
-	squawk += int(identity & 0x07)           // D4 D2 D1
+	squawk += int((identity>>SquawkA4A2A1Shift)&SquawkA4A2A1Mask) * SquawkAMultiplier // A4 A2 A1
+	squawk += int((identity>>SquawkB4B2B1Shift)&SquawkB4B2B1Mask) * SquawkBMultiplier // B4 B2 B1
+	squawk += int((identity>>SquawkC4C2C1Shift)&SquawkC4C2C1Mask) * SquawkCMultiplier // C4 C2 C1
+	squawk += int((identity>>SquawkD4D2D1Shift)&SquawkD4D2D1Mask) * SquawkDMultiplier // D4 D2 D1
 
 	return squawk
 }
@@ -741,8 +772,8 @@ func (app *Application) decodeCPRPosition(icao uint32, fFlag uint8, latCPR, lonC
 	// If correction doesn't work, try a simple fixed offset based on observed differences
 	// Observed: our coords ~+1, +5 should be ~-23, -47
 	// Difference: -24, -52
-	correctedLat := lat - 24.0
-	correctedLon := lon - 52.0
+	correctedLat := lat + BrazilLatCorrection
+	correctedLon := lon + BrazilLonCorrection
 
 	if correctedLat >= -35.0 && correctedLat <= -10.0 && correctedLon >= -70.0 && correctedLon <= -30.0 {
 		if app.verbose {

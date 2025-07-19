@@ -8,6 +8,28 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// ADS-B CRC-24 polynomial constant (Mode S standard)
+const MODES_GENERATOR_POLY = 0xfff409
+
+// Pre-computed CRC table for performance optimization
+var crcTable []uint32
+
+// init initializes the pre-computed CRC table
+func init() {
+	crcTable = make([]uint32, 256)
+	for i := 0; i < 256; i++ {
+		c := uint32(i) << 16
+		for j := 0; j < 8; j++ {
+			if c&0x800000 != 0 {
+				c = (c << 1) ^ MODES_GENERATOR_POLY
+			} else {
+				c = c << 1
+			}
+		}
+		crcTable[i] = c & 0x00ffffff
+	}
+}
+
 // ADSBProcessor handles the complete ADS-B processing pipeline using dump1090's approach
 type ADSBProcessor struct {
 	logger       *logrus.Logger
@@ -378,25 +400,9 @@ func (p *ADSBProcessor) scoreMessage(msg *ADSBMessage) int {
 
 // calculateCRC calculates the ADS-B CRC-24 checksum using Mode S standard (from dump1090)
 func (p *ADSBProcessor) calculateCRC(data []byte) uint32 {
-	const MODES_GENERATOR_POLY = 0xfff409
-
 	var rem uint32 = 0
 
-	// Initialize CRC table if needed (simplified version)
-	crcTable := make([]uint32, 256)
-	for i := 0; i < 256; i++ {
-		c := uint32(i) << 16
-		for j := 0; j < 8; j++ {
-			if c&0x800000 != 0 {
-				c = (c << 1) ^ MODES_GENERATOR_POLY
-			} else {
-				c = c << 1
-			}
-		}
-		crcTable[i] = c & 0x00ffffff
-	}
-
-	// Calculate CRC
+	// Use pre-computed CRC table for better performance
 	n := len(data)
 	for i := 0; i < n; i++ {
 		rem = (rem << 8) ^ crcTable[uint32(data[i])^((rem&0xff0000)>>16)]
