@@ -497,6 +497,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for proper tag comparison
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -509,18 +511,71 @@ jobs:
     - name: Generate changelog
       id: changelog
       run: |
+        echo "=== Changelog Generation Debug Info ==="
+        echo "Current tag: ${{ needs.version.outputs.tag }}"
+        echo "Current version: ${{ needs.version.outputs.version }}"
+        echo "Git SHA: ${{ github.sha }}"
+        echo "All tags:"
+        git tag --sort=-version:refname || echo "No tags found"
+        echo "======================================"
+        
         # Get commits since last tag for changelog
         if [ -n "${{ needs.version.outputs.tag }}" ]; then
-          previous_tag=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          current_tag="${{ needs.version.outputs.tag }}"
+          
+          # Get all tags and find the previous one
+          all_tags=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
+          
+          if [ -n "$all_tags" ]; then
+            # Find the tag that comes before the current tag
+            previous_tag=""
+            for tag in $all_tags; do
+              if [ "$tag" != "$current_tag" ]; then
+                previous_tag="$tag"
+                break
+              fi
+            done
+          fi
+          
+          echo "Current tag: $current_tag"
+          echo "Previous tag: $previous_tag"
+          
           if [ -n "$previous_tag" ]; then
             echo "## Changes since $previous_tag" > RELEASE_NOTES.md
             echo "" >> RELEASE_NOTES.md
-            git log $previous_tag..HEAD --oneline --pretty=format:"- %s" >> RELEASE_NOTES.md
+            
+            # Get commits between previous tag and current HEAD
+            # Use --no-merges to exclude merge commits and focus on actual changes
+            commits=$(git log $previous_tag..HEAD --no-merges --oneline --pretty=format:"- %s" 2>/dev/null || echo "")
+            
+            if [ -n "$commits" ]; then
+              echo "$commits" >> RELEASE_NOTES.md
+            else
+              echo "- No new commits found (this might be a re-release)" >> RELEASE_NOTES.md
+            fi
+            
+            # Also add a summary of the version bump type
+            echo "" >> RELEASE_NOTES.md
+            echo "## Version Information" >> RELEASE_NOTES.md
+            echo "- **Version**: ${{ needs.version.outputs.version }}" >> RELEASE_NOTES.md
+            echo "- **Previous Version**: ${previous_tag#v}" >> RELEASE_NOTES.md
+            echo "- **Release Date**: $(date -u +"%Y-%m-%d %H:%M UTC")" >> RELEASE_NOTES.md
+            echo "- **Commit**: ${{ github.sha }}" >> RELEASE_NOTES.md
+            
           else
             echo "## Initial Release" > RELEASE_NOTES.md
+            echo "" >> RELEASE_NOTES.md
+            echo "This is the first release of go1090." >> RELEASE_NOTES.md
+            echo "" >> RELEASE_NOTES.md
+            echo "## Version Information" >> RELEASE_NOTES.md
+            echo "- **Version**: ${{ needs.version.outputs.version }}" >> RELEASE_NOTES.md
+            echo "- **Release Date**: $(date -u +"%Y-%m-%d %H:%M UTC")" >> RELEASE_NOTES.md
+            echo "- **Commit**: ${{ github.sha }}" >> RELEASE_NOTES.md
           fi
         else
           echo "## Release Notes" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "Test release - no version information available." >> RELEASE_NOTES.md
         fi
         
         # Add download section
@@ -552,6 +607,11 @@ jobs:
         - librtlsdr library installed (except Windows)
         - 1090MHz antenna (for optimal reception)
         EOF
+        
+        # Display the generated changelog for debugging
+        echo "=== Generated Changelog ==="
+        cat RELEASE_NOTES.md
+        echo "==========================="
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
