@@ -216,10 +216,20 @@ jobs:
       if: matrix.os == 'darwin'
       shell: bash
       run: |
-        brew install librtlsdr pkg-config
+        brew install librtlsdr pkg-config libusb
         
         # Set up environment for cross-compilation
-        echo "PKG_CONFIG_PATH=$(brew --prefix librtlsdr)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        echo "PKG_CONFIG_PATH=$(brew --prefix librtlsdr)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        
+        # Set up CGO environment for macOS with both librtlsdr and libusb
+        echo "CGO_CFLAGS=-I$(brew --prefix librtlsdr)/include -I$(brew --prefix libusb)/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L$(brew --prefix librtlsdr)/lib -L$(brew --prefix libusb)/lib" >> $GITHUB_ENV
+        
+        # Create symlinks to ensure header files are accessible
+        sudo mkdir -p /usr/local/include
+        sudo ln -sf $(brew --prefix librtlsdr)/include/rtl-sdr.h /usr/local/include/rtl-sdr.h 2>/dev/null || true
+        sudo mkdir -p /usr/local/include/libusb-1.0
+        sudo ln -sf $(brew --prefix libusb)/include/libusb-1.0/libusb.h /usr/local/include/libusb-1.0/libusb.h 2>/dev/null || true
 
     - name: Set up build environment
       shell: bash
@@ -281,6 +291,51 @@ jobs:
         PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs librtlsdr
         PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig pkg-config --libs libusb-1.0
 
+    - name: Validate setup (macOS)
+      if: matrix.os == 'darwin'
+      shell: bash
+      run: |
+        echo "macOS CGO validation:"
+        echo "PKG_CONFIG_PATH: $PKG_CONFIG_PATH"
+        echo "CGO_CFLAGS: $CGO_CFLAGS"
+        echo "CGO_LDFLAGS: $CGO_LDFLAGS"
+        echo ""
+        echo "Package validation:"
+        pkg-config --exists librtlsdr && echo "✅ librtlsdr found" || echo "❌ librtlsdr not found"
+        pkg-config --exists libusb-1.0 && echo "✅ libusb-1.0 found" || echo "❌ libusb-1.0 not found"
+        echo ""
+        echo "Header file validation:"
+        ls -la $(brew --prefix librtlsdr)/include/rtl-sdr.h 2>/dev/null && echo "✅ rtl-sdr.h found" || echo "❌ rtl-sdr.h not found"
+        ls -la $(brew --prefix libusb)/include/libusb-1.0/libusb.h 2>/dev/null && echo "✅ libusb.h found" || echo "❌ libusb.h not found"
+        echo ""
+        echo "Library validation:"
+        ls -la $(brew --prefix librtlsdr)/lib/librtlsdr* 2>/dev/null || echo "No librtlsdr libraries found"
+        ls -la $(brew --prefix libusb)/lib/libusb* 2>/dev/null || echo "No libusb libraries found"
+        echo ""
+        echo "Testing pkg-config:"
+        pkg-config --cflags librtlsdr
+        pkg-config --libs librtlsdr
+        pkg-config --cflags libusb-1.0
+        pkg-config --libs libusb-1.0
+        echo ""
+        echo "Testing C compiler access:"
+        echo "#include <rtl-sdr.h>" | clang -E -x c - 2>/dev/null && echo "✅ C compiler can find rtl-sdr.h" || echo "❌ C compiler cannot find rtl-sdr.h"
+        echo "#include <libusb-1.0/libusb.h>" | clang -E -x c - 2>/dev/null && echo "✅ C compiler can find libusb.h" || echo "❌ C compiler cannot find libusb.h"
+        echo ""
+        echo "Testing with explicit include paths:"
+        echo "#include <rtl-sdr.h>" | clang -I$(brew --prefix librtlsdr)/include -E -x c - 2>/dev/null && echo "✅ C compiler can find rtl-sdr.h with explicit path" || echo "❌ C compiler cannot find rtl-sdr.h with explicit path"
+        echo "#include <libusb-1.0/libusb.h>" | clang -I$(brew --prefix libusb)/include -E -x c - 2>/dev/null && echo "✅ C compiler can find libusb.h with explicit path" || echo "❌ C compiler cannot find libusb.h with explicit path"
+        echo ""
+        echo "Detailed path information:"
+        echo "librtlsdr prefix: $(brew --prefix librtlsdr)"
+        echo "libusb prefix: $(brew --prefix libusb)"
+        find $(brew --prefix librtlsdr) -name "*.h" 2>/dev/null | head -10
+        find $(brew --prefix libusb) -name "*.h" 2>/dev/null | head -10
+        echo ""
+        echo "Symlink verification:"
+        ls -la /usr/local/include/rtl-sdr.h 2>/dev/null || echo "rtl-sdr.h symlink not found"
+        ls -la /usr/local/include/libusb-1.0/libusb.h 2>/dev/null || echo "libusb.h symlink not found"
+
     - name: Build binary
       shell: bash
       run: |
@@ -309,9 +364,50 @@ jobs:
           # For ARM64 cross-compilation, explicitly set CGO flags
           export CGO_LDFLAGS="-L/usr/lib/aarch64-linux-gnu -lrtlsdr -lusb-1.0"
           echo "Using explicit CGO_LDFLAGS: $CGO_LDFLAGS"
+        elif [ "${{ matrix.os }}" = "darwin" ]; then
+          # For macOS, use pkg-config to get proper flags
+          echo "Using pkg-config for macOS CGO configuration..."
+          
+          # Get pkg-config flags
+          CGO_CFLAGS_PKG="$(pkg-config --cflags librtlsdr libusb-1.0)"
+          CGO_LDFLAGS_PKG="$(pkg-config --libs librtlsdr libusb-1.0)"
+          
+          # Combine with existing flags
+          export CGO_CFLAGS="$CGO_CFLAGS $CGO_CFLAGS_PKG"
+          export CGO_LDFLAGS="$CGO_LDFLAGS $CGO_LDFLAGS_PKG"
+          
+          echo "CGO_CFLAGS: $CGO_CFLAGS"
+          echo "CGO_LDFLAGS: $CGO_LDFLAGS"
+          
+          # Also set PKG_CONFIG_PATH to ensure pkg-config can find everything
+          export PKG_CONFIG_PATH="$(brew --prefix librtlsdr)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          
+          # Fallback: if pkg-config doesn't work, try direct paths
+          if [ -z "$CGO_CFLAGS_PKG" ] || [ -z "$CGO_LDFLAGS_PKG" ]; then
+            echo "pkg-config failed, using fallback paths..."
+            export CGO_CFLAGS="-I$(brew --prefix librtlsdr)/include -I$(brew --prefix libusb)/include"
+            export CGO_LDFLAGS="-L$(brew --prefix librtlsdr)/lib -L$(brew --prefix libusb)/lib -lrtlsdr -lusb-1.0"
+          fi
         fi
         
-        go build -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
+        # Test build with verbose output for debugging
+        echo "Testing build with verbose output..."
+        go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+          echo "Build failed, trying with explicit CGO flags..."
+          # Try with explicit CGO flags
+          CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+            echo "Build still failed, trying minimal CGO configuration..."
+            # Try with minimal CGO configuration - just ensure libraries are available
+            unset CGO_CFLAGS
+            unset CGO_LDFLAGS
+            export PKG_CONFIG_PATH="$(brew --prefix librtlsdr)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig"
+            go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+              echo "All build attempts failed. Trying with explicit include paths..."
+              # Last resort: try with explicit include paths
+              CGO_CFLAGS="-I$(brew --prefix librtlsdr)/include -I$(brew --prefix libusb)/include" CGO_LDFLAGS="-L$(brew --prefix librtlsdr)/lib -L$(brew --prefix libusb)/lib -lrtlsdr -lusb-1.0" go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
+            }
+          }
+        }
 
     - name: Create release package
       shell: bash
