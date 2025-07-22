@@ -1,4 +1,4 @@
-package main
+package basestation
 
 import (
 	"fmt"
@@ -7,16 +7,19 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"go1090/internal/beast"
+	"go1090/internal/logging"
 )
 
 // BaseStation message types
 const (
-	BaseStationSEL = "SEL" // Selection Change
-	BaseStationID  = "ID"  // New ID
-	BaseStationAIR = "AIR" // New Aircraft
-	BaseStationSTA = "STA" // Status Change
-	BaseStationCLK = "CLK" // Click
-	BaseStationMSG = "MSG" // Transmission
+	SEL = "SEL" // Selection Change
+	ID  = "ID"  // New ID
+	AIR = "AIR" // New Aircraft
+	STA = "STA" // Status Change
+	CLK = "CLK" // Click
+	MSG = "MSG" // Transmission
 )
 
 // BaseStation transmission types
@@ -31,8 +34,8 @@ const (
 	TransmissionALL_CALL        = 8 // All Call Reply
 )
 
-// BaseStationMessage represents a BaseStation format message
-type BaseStationMessage struct {
+// Message represents a BaseStation format message
+type Message struct {
 	MessageType      string
 	TransmissionType int
 	SessionID        int
@@ -57,17 +60,17 @@ type BaseStationMessage struct {
 	IsOnGround       string
 }
 
-// BaseStationWriter writes messages in BaseStation format
-type BaseStationWriter struct {
-	logRotator *LogRotator
+// Writer writes messages in BaseStation format
+type Writer struct {
+	logRotator *logging.LogRotator
 	logger     *logrus.Logger
 	sessionID  int
 	aircraftID int
 }
 
-// NewBaseStationWriter creates a new BaseStation writer
-func NewBaseStationWriter(logRotator *LogRotator, logger *logrus.Logger) *BaseStationWriter {
-	return &BaseStationWriter{
+// NewWriter creates a new BaseStation writer
+func NewWriter(logRotator *logging.LogRotator, logger *logrus.Logger) *Writer {
+	return &Writer{
 		logRotator: logRotator,
 		logger:     logger,
 		sessionID:  1,
@@ -76,7 +79,7 @@ func NewBaseStationWriter(logRotator *LogRotator, logger *logrus.Logger) *BaseSt
 }
 
 // WriteMessage writes a Beast message in BaseStation format
-func (w *BaseStationWriter) WriteMessage(msg *BeastMessage) error {
+func (w *Writer) WriteMessage(msg *beast.Message) error {
 	if msg == nil {
 		return fmt.Errorf("message cannot be nil")
 	}
@@ -110,7 +113,7 @@ func (w *BaseStationWriter) WriteMessage(msg *BeastMessage) error {
 }
 
 // WriteADSBMessage writes an ADS-B message in BaseStation format (placeholder for future use)
-func (w *BaseStationWriter) WriteADSBMessage(data []byte) error {
+func (w *Writer) WriteADSBMessage(data []byte) error {
 	// For now, this is a placeholder
 	// In the future, this could handle raw ADS-B data
 	w.logger.Debug("WriteADSBMessage called (not implemented)")
@@ -118,11 +121,11 @@ func (w *BaseStationWriter) WriteADSBMessage(data []byte) error {
 }
 
 // convertMessage converts a Beast message to BaseStation format
-func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessage {
+func (w *Writer) convertMessage(msg *beast.Message) *Message {
 	now := time.Now()
 
-	baseMsg := &BaseStationMessage{
-		MessageType:   BaseStationMSG,
+	baseMsg := &Message{
+		MessageType:   MSG,
 		SessionID:     w.sessionID,
 		AircraftID:    w.aircraftID,
 		FlightID:      w.aircraftID,
@@ -133,7 +136,7 @@ func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessag
 	}
 
 	switch msg.MessageType {
-	case BeastModeAC:
+	case beast.ModeAC:
 		// Mode A/C message
 		baseMsg.TransmissionType = TransmissionSURVEILLANCE
 		baseMsg.HexIdent = ""
@@ -145,7 +148,7 @@ func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessag
 
 		return baseMsg
 
-	case BeastModeS, BeastModeSLong:
+	case beast.ModeS, beast.ModeSLong:
 		// Mode S message
 		icao := msg.GetICAO()
 		if icao != 0 {
@@ -238,14 +241,14 @@ func (w *BaseStationWriter) convertMessage(msg *BeastMessage) *BaseStationMessag
 }
 
 // convertADSBMessage converts raw ADS-B data to BaseStation format (placeholder for future use)
-func (w *BaseStationWriter) convertADSBMessage(data []byte) *BaseStationMessage {
+func (w *Writer) convertADSBMessage(data []byte) *Message {
 	// This is a placeholder for future ADS-B message parsing
 	// For now, return nil to indicate no conversion
 	return nil
 }
 
 // formatCSV formats a BaseStation message as CSV
-func (w *BaseStationWriter) formatCSV(msg *BaseStationMessage) string {
+func (w *Writer) formatCSV(msg *Message) string {
 	fields := []string{
 		msg.MessageType,
 		strconv.Itoa(msg.TransmissionType),
@@ -275,7 +278,7 @@ func (w *BaseStationWriter) formatCSV(msg *BaseStationMessage) string {
 }
 
 // extractAltitude extracts altitude from Mode S message
-func (w *BaseStationWriter) extractAltitude(data []byte) int {
+func (w *Writer) extractAltitude(data []byte) int {
 	if len(data) < 3 {
 		return 0
 	}
@@ -292,7 +295,7 @@ func (w *BaseStationWriter) extractAltitude(data []byte) int {
 }
 
 // extractSquawk extracts squawk code from Mode S message
-func (w *BaseStationWriter) extractSquawk(data []byte) int {
+func (w *Writer) extractSquawk(data []byte) int {
 	if len(data) < 3 {
 		return 0
 	}
@@ -305,7 +308,7 @@ func (w *BaseStationWriter) extractSquawk(data []byte) int {
 }
 
 // extractCallsign extracts callsign from Aircraft ID message
-func (w *BaseStationWriter) extractCallsign(data []byte) string {
+func (w *Writer) extractCallsign(data []byte) string {
 	if len(data) < 11 {
 		return ""
 	}
@@ -338,7 +341,7 @@ func (w *BaseStationWriter) extractCallsign(data []byte) string {
 }
 
 // extractPosition extracts position from position message (simplified)
-func (w *BaseStationWriter) extractPosition(data []byte) (float64, float64) {
+func (w *Writer) extractPosition(data []byte) (float64, float64) {
 	// This is a simplified position extraction
 	// Real CPR (Compact Position Reporting) decoding is much more complex
 	// and requires multiple messages to determine position
@@ -346,7 +349,7 @@ func (w *BaseStationWriter) extractPosition(data []byte) (float64, float64) {
 }
 
 // extractVelocity extracts velocity information from velocity message
-func (w *BaseStationWriter) extractVelocity(data []byte) (int, float64, int) {
+func (w *Writer) extractVelocity(data []byte) (int, float64, int) {
 	if len(data) < 9 {
 		return 0, 0, 0
 	}

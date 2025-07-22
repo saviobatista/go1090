@@ -1,4 +1,4 @@
-package main
+package adsb
 
 import (
 	"testing"
@@ -164,8 +164,6 @@ func TestBitValue(t *testing.T) {
 
 // TestCalculateCRC tests the calculateCRC function
 func TestCalculateCRC(t *testing.T) {
-	processor := NewADSBProcessor(2400000, logrus.New())
-
 	tests := []struct {
 		name     string
 		input    []byte
@@ -195,7 +193,7 @@ func TestCalculateCRC(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := processor.calculateCRC(tt.input)
+			result := CalculateCRC(tt.input)
 			// Since CRC calculation is complex, just verify it returns a valid 24-bit value
 			assert.True(t, result <= 0xFFFFFF)
 			assert.IsType(t, uint32(0), result)
@@ -592,11 +590,10 @@ func BenchmarkProcessIQSamples(b *testing.B) {
 }
 
 func BenchmarkCalculateCRC(b *testing.B) {
-	processor := NewADSBProcessor(2400000, logrus.New())
 	data := []byte{0x8D, 0x48, 0x44, 0x12, 0x58, 0x9F, 0x48, 0xA3, 0xC4, 0x7E, 0x30}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		processor.calculateCRC(data)
+		CalculateCRC(data)
 	}
 }

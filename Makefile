@@ -6,7 +6,7 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 # Build flags
-LDFLAGS := -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)
+LDFLAGS := -X go1090/internal/app.Version=$(VERSION) -X go1090/internal/app.BuildTime=$(BUILD_TIME) -X go1090/internal/app.GitCommit=$(GIT_COMMIT)
 BUILD_FLAGS := -ldflags "$(LDFLAGS)"
 
 # Go parameters
@@ -85,69 +85,69 @@ check-deps: ## Check if required dependencies are installed
 # Building
 build: check-deps ## Build the binary for current platform
 	@echo "Building $(BINARY_NAME) v$(VERSION)..."
-	$(call get_cgo_flags) $(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_NAME) .
+	$(call get_cgo_flags) $(GOBUILD) $(BUILD_FLAGS) -o $(BINARY_NAME) ./cmd/go1090
 	@echo "✅ Build complete: $(BINARY_NAME)"
 
 build-static: check-deps ## Build static binary (Linux only)
 	@echo "Building static $(BINARY_NAME) v$(VERSION)..."
-	CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -ldflags "$(LDFLAGS) -linkmode external -extldflags '-static'" -o $(BINARY_NAME) .
+	CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -ldflags "$(LDFLAGS) -linkmode external -extldflags '-static'" -o $(BINARY_NAME) ./cmd/go1090
 	@echo "✅ Static build complete: $(BINARY_NAME)"
 
 # Cross-platform builds
 build-linux: ## Build for Linux (amd64)
 	@echo "Building for Linux..."
 	mkdir -p $(DIST_DIR)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 .
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/go1090
 
 build-linux-arm64: ## Build for Linux ARM64
 	@echo "Building for Linux ARM64..."
 	mkdir -p $(DIST_DIR)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 .
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/go1090
 
 build-darwin: ## Build for macOS
 	@echo "Building for macOS..."
 	mkdir -p $(DIST_DIR)
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 .
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 .
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/go1090
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/go1090
 
 build-windows: ## Build for Windows (no CGO)
 	@echo "Building for Windows (limited RTL-SDR support)..."
 	mkdir -p $(DIST_DIR)
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-windows-amd64.exe .
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/go1090
 
 build-all: build-linux build-linux-arm64 build-darwin build-windows ## Build for all platforms
 
 # Testing
 test: ## Run all tests
-	$(GOTEST) -v .
+	$(GOTEST) -v ./...
 
 test-unit: ## Run unit tests only
-	$(GOTEST) -v -run "^Test.*(?:Beast|BaseStation|LogRotator).*" .
+	$(GOTEST) -v -run "^Test.*(?:Beast|BaseStation|LogRotator).*" ./...
 
 test-integration: ## Run integration tests only
-	$(GOTEST) -v -run "^TestIntegration" .
+	$(GOTEST) -v -run "^TestIntegration" ./...
 
 test-coverage: ## Run tests with coverage report
-	$(GOTEST) -race -coverprofile=coverage.out -covermode=atomic .
+	$(GOTEST) -race -coverprofile=coverage.out -covermode=atomic ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 
 test-race: ## Run tests with race detection
-	$(GOTEST) -race -v .
+	$(GOTEST) -race -v ./...
 
 test-short: ## Run short tests only
-	$(GOTEST) -short -v .
+	$(GOTEST) -short -v ./...
 
 test-verbose: ## Run tests with verbose output
-	$(GOTEST) -v -x .
+	$(GOTEST) -v -x ./...
 
 test-bench: ## Run benchmarks
-	$(GOTEST) -bench=. -benchmem .
+	$(GOTEST) -bench=. -benchmem ./...
 
 test-profile: ## Run tests with CPU and memory profiling
-	$(GOTEST) -cpuprofile=cpu.prof -memprofile=mem.prof -bench=. .
+	$(GOTEST) -cpuprofile=cpu.prof -memprofile=mem.prof -bench=. ./...
 
 test-timeout: ## Run tests with timeout
-	$(GOTEST) -timeout=30s -v .
+	$(GOTEST) -timeout=30s -v ./...
 
 # Development
 run: build ## Build and run the application
