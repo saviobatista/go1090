@@ -571,7 +571,7 @@ func (app *Application) getBits(data []byte, firstBit, lastBit int) uint8 {
 		return ((data[fby] & topMask) << (16 - shift)) | (data[fby+1] << (8 - shift)) | (data[lby] >> shift)
 	}
 
-	// For even more complex cases
+	// For even more complex cases (velocity extraction needs up to 10-bit values)
 	var result uint32
 	for i := fby; i <= lby && i < len(data); i++ {
 		if i == fby {
@@ -580,7 +580,50 @@ func (app *Application) getBits(data []byte, firstBit, lastBit int) uint8 {
 			result = (result << 8) | uint32(data[i])
 		}
 	}
+
+	// Handle larger bit extractions for velocity fields
+	if nbi <= 32 {
+		return uint8((result >> shift) & ((1 << nbi) - 1))
+	}
+
 	return uint8(result >> shift)
+}
+
+// getBitsUint16 extracts bits from data using 1-based indexing, returning uint16 for larger values
+func (app *Application) getBitsUint16(data []byte, firstBit, lastBit int) uint16 {
+	if firstBit < 1 || lastBit < firstBit || len(data) == 0 {
+		return 0
+	}
+
+	// Convert to 0-based indexing
+	fbi := firstBit - 1
+	lbi := lastBit - 1
+	nbi := lastBit - firstBit + 1
+
+	if nbi > 16 {
+		return 0 // Can't extract more than 16 bits into uint16
+	}
+
+	fby := fbi / 8
+	lby := lbi / 8
+
+	if lby >= len(data) {
+		return 0
+	}
+
+	shift := 7 - (lbi % 8)
+	topMask := uint8(0xFF >> (fbi % 8))
+
+	var result uint32
+	for i := fby; i <= lby && i < len(data); i++ {
+		if i == fby {
+			result = uint32(data[i] & topMask)
+		} else {
+			result = (result << 8) | uint32(data[i])
+		}
+	}
+
+	return uint16((result >> shift) & ((1 << nbi) - 1))
 }
 
 // extractAltitude extracts altitude from surveillance or position messages
@@ -598,9 +641,10 @@ func (app *Application) extractAltitude(data []byte) int {
 		// Surveillance altitude reply - bits 20-32
 		altCode = (uint16(data[2]&0x1F) << 8) | uint16(data[3])
 	} else if df == 17 || df == 18 {
-		// Extended squitter - altitude is in bits 40-52 (bytes 5-6)
-		// Extract 13 bits: 5 bits from byte 5, 8 bits from byte 6
-		altCode = (uint16(data[5]&0x1F) << 8) | uint16(data[6])
+		// Extended squitter - altitude is in ME field bits 9-20 (AC12 field)
+		// ME starts at byte 4, so bits 9-20 of ME are in bytes 5-6 of the full message
+		// Extract 12-bit AC12 field properly
+		altCode = (uint16(data[5]&0x1F) << 7) | (uint16(data[6]) >> 1)
 	} else {
 		return 0
 	}
@@ -609,18 +653,30 @@ func (app *Application) extractAltitude(data []byte) int {
 		return 0
 	}
 
-	// Mode S altitude encoding (not Gray code for ADS-B)
-	// Remove the Q bit (bit 4) and decode
-	qBit := (altCode >> 4) & 0x01
+	// Decode altitude using dump1090's AC12 method
+	// Check Q-bit (bit 4 of the 12-bit field)
+	qBit := (altCode & 0x10) != 0
 
-	if qBit == 1 {
-		// 25-foot resolution
-		altValue := ((altCode & 0x1FE0) >> 1) | (altCode & 0x0F)
-		return int(altValue)*25 - 1000
+	if qBit {
+		// 25-foot resolution encoding (dump1090's decodeAC12Field)
+		// N is the 11 bit integer resulting from the removal of bit Q at bit 4
+		n := ((altCode & 0x0FE0) >> 1) | (altCode & 0x000F)
+		// The final altitude is the resulting number multiplied by 25, minus 1000
+		return int(n)*25 - 1000
 	} else {
-		// 100-foot resolution (Gray code)
-		// This is more complex, for now return simple calculation
-		return int(altCode)*25 - 1000
+		// 100-foot resolution (Gillham Mode C encoding)
+		// Make N a 13 bit Gillham coded altitude by inserting M=0 at bit 6
+		n13 := ((altCode & 0x0FC0) << 1) | (altCode & 0x003F)
+
+		// For now, use simplified decoding - full Gillham is complex
+		// This should handle most cases better than before
+		if n13 == 0 {
+			return 0
+		}
+
+		// Basic Mode C conversion (simplified)
+		modeC := int(n13) / 4 // Rough approximation
+		return modeC * 100
 	}
 }
 
@@ -659,96 +715,93 @@ func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 		app.logger.Debugf("Velocity message: subtype=%d, data=%x", subtype, data[:11])
 	}
 
-	if subtype != 1 && subtype != 2 && subtype != 3 && subtype != 4 {
+	if subtype < 1 || subtype > 4 {
 		if app.verbose {
-			app.logger.Debugf("Velocity extraction failed: unsupported subtype %d", subtype)
+			app.logger.Debugf("Velocity extraction failed: unsupported subtype %d (only 1-4 supported)", subtype)
 		}
-		return 0, 0, 0 // Only handle groundspeed and airspeed subtypes
+		return 0, 0, 0 // Only handle groundspeed and airspeed subtypes (1-4)
 	}
 
-	var ewSpeed, nsSpeed float64
 	var groundSpeed int
 	var track float64
 
 	if subtype == 1 || subtype == 2 {
-		// Ground speed subtypes
-		// Extract east-west velocity
-		ewDir := (data[5] >> 2) & 0x01
-		ewVel := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+		// Ground speed subtypes (dump1090 method)
+		// ME field starts at data[4], so velocity bits are in ME[1-4]
+		me := data[4:]
 
-		// Extract north-south velocity
-		nsDir := (data[7] >> 7) & 0x01
-		nsVel := (((uint16(data[7]&0x7F) << 3) | (uint16(data[8]) >> 5)) & 0x3FF) - 1
+		// Extract east-west velocity (bits 15-24 of ME)
+		ewRaw := app.getBitsUint16(me, 15, 24)
+		// Extract north-south velocity (bits 26-35 of ME)
+		nsRaw := app.getBitsUint16(me, 26, 35)
 
 		if app.verbose {
-			app.logger.Debugf("Ground speed components: ewDir=%d, ewVel=%d, nsDir=%d, nsVel=%d", ewDir, ewVel, nsDir, nsVel)
+			app.logger.Debugf("Ground speed components: ewDir=%d, ewVel=%d, nsDir=%d, nsVel=%d",
+				app.getBits(me, 14, 14), ewRaw, app.getBits(me, 25, 25), nsRaw)
 		}
 
-		// Convert to signed values
-		if ewDir == 1 {
-			ewSpeed = -float64(ewVel)
-		} else {
-			ewSpeed = float64(ewVel)
-		}
-
-		if nsDir == 1 {
-			nsSpeed = -float64(nsVel)
-		} else {
-			nsSpeed = float64(nsVel)
-		}
-
-		// Calculate ground speed and track
-		groundSpeed = int(math.Sqrt(ewSpeed*ewSpeed + nsSpeed*nsSpeed))
-		track = math.Atan2(ewSpeed, nsSpeed) * 180.0 / math.Pi
-		if track < 0 {
-			track += 360
-		}
-
-		// Only return valid data if we have reasonable values
-		if groundSpeed > 0 && groundSpeed < 1000 {
-			if app.verbose {
-				app.logger.Debugf("Valid ground speed: %d kt, track: %.1f°", groundSpeed, track)
+		if ewRaw != 0 && nsRaw != 0 {
+			// Convert to signed velocities (dump1090 style)
+			ewVel := int(ewRaw-1) * (1 << (subtype - 1)) // subtype 1: *1, subtype 2: *4
+			if app.getBits(me, 14, 14) != 0 {
+				ewVel = -ewVel
 			}
-		} else {
-			groundSpeed = 0
-			track = 0
+
+			nsVel := int(nsRaw-1) * (1 << (subtype - 1))
+			if app.getBits(me, 25, 25) != 0 {
+				nsVel = -nsVel
+			}
+
+			// Calculate ground speed and track (dump1090 method)
+			groundSpeed = int(math.Sqrt(float64(nsVel*nsVel+ewVel*ewVel)) + 0.5)
+
+			if groundSpeed > 0 {
+				track = math.Atan2(float64(ewVel), float64(nsVel)) * 180.0 / math.Pi
+				if track < 0 {
+					track += 360
+				}
+
+				if app.verbose {
+					app.logger.Debugf("Valid ground speed: %d kt, track: %.1f°", groundSpeed, track)
+				}
+			}
 		}
 
 	} else if subtype == 3 || subtype == 4 {
-		// Airspeed subtypes
-		// Extract airspeed
-		airspeedAvail := (data[5] >> 2) & 0x01
-		airspeed := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+		// Airspeed subtypes (dump1090 method)
+		me := data[4:]
 
-		// Extract heading
-		headingAvail := (data[7] >> 2) & 0x01
-		heading := float64(((uint16(data[7]&0x03)<<8)|uint16(data[8]))*360) / 1024.0
-
-		if app.verbose {
-			app.logger.Debugf("Airspeed data: airspeedAvail=%d, airspeed=%d, headingAvail=%d, heading=%.1f",
-				airspeedAvail, airspeed, headingAvail, heading)
+		// Extract heading (bits 15-24 of ME)
+		if app.getBits(me, 14, 14) != 0 {
+			track = float64(app.getBitsUint16(me, 15, 24)) * 360.0 / 1024.0
 		}
 
-		// For airspeed subtypes, treat airspeed as ground speed approximation
-		if airspeedAvail == 1 && airspeed > 0 && airspeed < 1000 {
-			groundSpeed = int(airspeed)
+		// Extract airspeed (bits 26-35 of ME)
+		airspeedRaw := app.getBitsUint16(me, 26, 35)
+		if airspeedRaw != 0 {
+			airspeed := int(airspeedRaw-1) * (1 << (subtype - 3)) // subtype 3: *1, subtype 4: *4
+
+			// For airspeed messages, we don't get ground speed directly
+			// But we can use airspeed as an approximation
+			groundSpeed = airspeed
+
 			if app.verbose {
-				app.logger.Debugf("Using airspeed as ground speed: %d kt", groundSpeed)
+				app.logger.Debugf("Airspeed data: airspeed=%d, heading=%.1f", airspeed, track)
+				if groundSpeed > 0 {
+					app.logger.Debugf("Using airspeed as ground speed: %d kt", groundSpeed)
+				}
 			}
-		}
-		if headingAvail == 1 {
-			track = heading
 		}
 	}
 
-	// Extract vertical rate (common for all subtypes)
-	vrSign := (data[8] >> 3) & 0x01
-	vrValue := ((uint16(data[8]&0x07) << 6) | (uint16(data[9]) >> 2)) & 0x1FF
+	// Extract vertical rate (common for all subtypes) - dump1090 method
+	me := data[4:]
+	vrRaw := app.getBitsUint16(me, 38, 46) // bits 38-46 of ME
 
 	var verticalRate int
-	if vrValue != 0 {
-		verticalRate = int(vrValue-1) * 64
-		if vrSign == 1 {
+	if vrRaw != 0 {
+		verticalRate = int(vrRaw-1) * 64
+		if app.getBits(me, 37, 37) != 0 { // sign bit 37
 			verticalRate = -verticalRate
 		}
 	}
