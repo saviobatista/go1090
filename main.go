@@ -350,7 +350,21 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 		alert := ""
 		emergency := ""
 		spi := ""
-		isOnGround := "0"
+		isOnGround := app.extractGroundState(msg.Data[:])
+
+		// Extract alert, emergency, and SPI flags
+		if alertFlag, spiFlag := app.extractAlertSPI(msg.Data[:]); alertFlag || spiFlag {
+			if alertFlag {
+				alert = "1"
+			}
+			if spiFlag {
+				spi = "1"
+			}
+		}
+
+		if emergencyStatus := app.extractEmergency(msg.Data[:]); emergencyStatus != "" {
+			emergency = emergencyStatus
+		}
 
 		// Parse based on type code
 		switch {
@@ -439,6 +453,20 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 
 		altitude := ""
 		squawk := ""
+		alert := ""
+		emergency := ""
+		spi := ""
+		isOnGround := app.extractGroundState(msg.Data[:])
+
+		// Extract alert and SPI flags
+		if alertFlag, spiFlag := app.extractAlertSPI(msg.Data[:]); alertFlag || spiFlag {
+			if alertFlag {
+				alert = "1"
+			}
+			if spiFlag {
+				spi = "1"
+			}
+		}
 
 		if df == 4 || df == 20 {
 			if alt := app.extractAltitude(msg.Data[:]); alt != 0 {
@@ -458,10 +486,10 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 			}
 		}
 
-		return fmt.Sprintf("MSG,%s,%s,%s,%s,%s,%s,%s,%s,%s,,%s,,,,,%s,,,,%s",
+		return fmt.Sprintf("MSG,%s,%s,%s,%s,%s,%s,%s,%s,%s,,%s,,,,,%s,%s,%s,%s,%s",
 			transmissionType, sessionID, aircraftID, icao, flightID,
 			dateStr, timeStr, dateStr, timeStr,
-			altitude, squawk, "0")
+			altitude, squawk, alert, emergency, spi, isOnGround)
 
 	default:
 		if app.verbose {
@@ -668,15 +696,51 @@ func (app *Application) extractAltitude(data []byte) int {
 		// Make N a 13 bit Gillham coded altitude by inserting M=0 at bit 6
 		n13 := ((altCode & 0x0FC0) << 1) | (altCode & 0x003F)
 
-		// For now, use simplified decoding - full Gillham is complex
-		// This should handle most cases better than before
 		if n13 == 0 {
 			return 0
 		}
 
-		// Basic Mode C conversion (simplified)
-		modeC := int(n13) / 4 // Rough approximation
-		return modeC * 100
+		// Improved Gillham Mode C decoding (based on dump1090's modeAToModeC)
+		// This is still simplified but much more accurate than before
+
+		// Gray code to binary conversion for altitude
+		// Extract the individual bits for proper Gillham decoding
+		c1 := int((n13 >> 11) & 1)
+		a1 := int((n13 >> 10) & 1)
+		c2 := int((n13 >> 9) & 1)
+		a2 := int((n13 >> 8) & 1)
+		c4 := int((n13 >> 7) & 1)
+		a4 := int((n13 >> 6) & 1)
+		// bit 6 is M (should be 0)
+		b1 := int((n13 >> 5) & 1)
+		b2 := int((n13 >> 4) & 1)
+
+		// Basic validation - reject obviously invalid patterns
+		if (c1 == 0 && a1 == 0 && c2 == 0 && a2 == 0) ||
+			(c1 == 1 && a1 == 1 && c2 == 1 && a2 == 1) {
+			return 0 // Invalid pattern
+		}
+
+		// Simplified conversion - convert to 500ft increments first
+		hundreds := c1*4 + a1*2 + c2*1
+		if a2 == 1 {
+			hundreds = 7 - hundreds
+		}
+
+		fiveHundreds := c4*4 + a4*2 + b1*1
+		if b2 == 1 {
+			fiveHundreds = 7 - fiveHundreds
+		}
+
+		// Combine and convert to feet (each unit = 100ft)
+		altitude := (fiveHundreds*5 + hundreds) * 100
+
+		// Sanity check - reject unrealistic altitudes
+		if altitude < -2000 || altitude > 60000 {
+			return 0
+		}
+
+		return altitude
 	}
 }
 
@@ -933,218 +997,175 @@ func (app *Application) decodeCPRPosition(icao uint32, fFlag uint8, latCPR, lonC
 	return 0, 0
 }
 
-// decodeCPRBothFrames decodes position using both even and odd frames (most accurate)
+// cprModInt performs always positive MOD operation (dump1090 style)
+func cprModInt(a, b int) int {
+	res := a % b
+	if res < 0 {
+		res += b
+	}
+	return res
+}
+
+// decodeCPRBothFrames decodes position using both even and odd frames (dump1090 algorithm)
 func (app *Application) decodeCPRBothFrames(evenFrame, oddFrame *CPRFrame) (float64, float64) {
-	// Extract normalized CPR values
-	lat0 := float64(evenFrame.LatCPR) / CPR_LAT_MAX // Even frame latitude
-	lat1 := float64(oddFrame.LatCPR) / CPR_LAT_MAX  // Odd frame latitude
-	lon0 := float64(evenFrame.LonCPR) / CPR_LON_MAX // Even frame longitude
-	lon1 := float64(oddFrame.LonCPR) / CPR_LON_MAX  // Odd frame longitude
+	// Use dump1090's exact CPR algorithm
+	const CPR_MAX = 131072.0 // 2^17
 
-	const nz = 15.0
-	dlat0 := 360.0 / (4.0 * nz)     // 6.0 degrees for even frame
-	dlat1 := 360.0 / (4.0*nz - 1.0) // ~6.101 degrees for odd frame
+	AirDlat0 := 360.0 / 60.0 // 6.0 degrees for even frame
+	AirDlat1 := 360.0 / 59.0 // ~6.101 degrees for odd frame
 
-	// Calculate latitude index
-	j := int(math.Floor(59*lat0 - 60*lat1 + 0.5))
+	lat0 := float64(evenFrame.LatCPR)
+	lat1 := float64(oddFrame.LatCPR)
+	lon0 := float64(evenFrame.LonCPR)
+	lon1 := float64(oddFrame.LonCPR)
 
-	// Calculate latitude for both frames
-	rlat0 := dlat0 * (float64(j%60) + lat0) // Even frame latitude
-	rlat1 := dlat1 * (float64(j%59) + lat1) // Odd frame latitude
+	// Compute the Latitude Index "j" (dump1090 method)
+	j := int(math.Floor(((59*lat0 - 60*lat1) / CPR_MAX) + 0.5))
 
-	// Use the most recent frame's latitude
-	var lat float64
-	if evenFrame.Timestamp.After(oddFrame.Timestamp) {
-		lat = rlat0
-	} else {
-		lat = rlat1
+	rlat0 := AirDlat0 * (float64(cprModInt(j, 60)) + lat0/CPR_MAX)
+	rlat1 := AirDlat1 * (float64(cprModInt(j, 59)) + lat1/CPR_MAX)
+
+	// Normalize latitudes (dump1090 method)
+	if rlat0 >= 270 {
+		rlat0 -= 360
+	}
+	if rlat1 >= 270 {
+		rlat1 -= 360
 	}
 
-	// Check for valid latitude
-	if lat < -90 || lat > 90 {
-		// Try alternative zones
-		for offset := -1; offset <= 1; offset++ {
-			testJ := j + offset
-			testLat0 := dlat0 * (float64(testJ%60) + lat0)
-			testLat1 := dlat1 * (float64(testJ%59) + lat1)
-
-			if testLat0 >= -90 && testLat0 <= 90 {
-				lat = testLat0
-				j = testJ
-				break
-			} else if testLat1 >= -90 && testLat1 <= 90 {
-				lat = testLat1
-				j = testJ
-				break
-			}
+	// Check to see that the latitude is in range: -90 .. +90
+	if rlat0 < -90 || rlat0 > 90 || rlat1 < -90 || rlat1 > 90 {
+		if app.verbose {
+			app.logger.Debugf("CPR: bad latitude data, rlat0=%.6f, rlat1=%.6f", rlat0, rlat1)
 		}
+		return 0, 0 // bad data
+	}
+
+	// Check that both are in the same latitude zone, or abort
+	if app.cprNLTable(rlat0) != app.cprNLTable(rlat1) {
+		if app.verbose {
+			app.logger.Debugf("CPR: positions crossed latitude zone, nl0=%d, nl1=%d", app.cprNLTable(rlat0), app.cprNLTable(rlat1))
+		}
+		return 0, 0 // positions crossed a latitude zone, try again later
+	}
+
+	// Determine which frame to use (use most recent)
+	var rlat, rlon float64
+
+	if oddFrame.Timestamp.After(evenFrame.Timestamp) {
+		// Use odd packet
+		ni := app.cprNFunction(rlat1, 1)
+		m := int(math.Floor((((lon0 * float64(app.cprNLTable(rlat1)-1)) -
+			(lon1 * float64(app.cprNLTable(rlat1)))) / CPR_MAX) + 0.5))
+		rlon = app.cprDlonFunction(rlat1, 1) * (float64(cprModInt(m, ni)) + lon1/CPR_MAX)
+		rlat = rlat1
+	} else {
+		// Use even packet
+		ni := app.cprNFunction(rlat0, 0)
+		m := int(math.Floor((((lon0 * float64(app.cprNLTable(rlat0)-1)) -
+			(lon1 * float64(app.cprNLTable(rlat0)))) / CPR_MAX) + 0.5))
+		rlon = app.cprDlonFunction(rlat0, 0) * (float64(cprModInt(m, ni)) + lon0/CPR_MAX)
+		rlat = rlat0
+	}
+
+	// Renormalize longitude to -180 .. +180 (dump1090 method)
+	rlon -= math.Floor((rlon+180)/360) * 360
+
+	if app.verbose {
+		app.logger.Debugf("Both frames CPR: lat=%.6f, lon=%.6f, j=%d", rlat, rlon, j)
+	}
+
+	return rlat, rlon
+}
+
+// cprNFunction returns the number of longitude zones (dump1090 style)
+func (app *Application) cprNFunction(lat float64, fflag int) int {
+	nl := app.cprNLTable(lat) - fflag
+	if nl < 1 {
+		nl = 1
+	}
+	return nl
+}
+
+// cprDlonFunction returns longitude zone width (dump1090 style)
+func (app *Application) cprDlonFunction(lat float64, fflag int) float64 {
+	return 360.0 / float64(app.cprNFunction(lat, fflag))
+}
+
+// decodeCPRSingleFrame decodes position using a single frame (less accurate, requires reference position)
+func (app *Application) decodeCPRSingleFrame(frame *CPRFrame) (float64, float64) {
+	// For single frame decoding, we need a reference position
+	// Use a reasonable default for Brazil region: São Paulo area
+	refLat := -23.5505 // São Paulo latitude
+	refLon := -46.6333 // São Paulo longitude
+
+	// Try to use a more recent known position if available
+	app.positionMutex.Lock()
+	for _, aircraft := range app.aircraftPositions {
+		if aircraft.LastPos != nil && time.Since(aircraft.LastPos.Timestamp) < 5*time.Minute {
+			refLat = aircraft.LastPos.Latitude
+			refLon = aircraft.LastPos.Longitude
+			break
+		}
+	}
+	app.positionMutex.Unlock()
+
+	const CPR_MAX = 131072.0 // 2^17
+
+	// Use dump1090's single-frame algorithm with reference position
+	lat := float64(frame.LatCPR)
+	lon := float64(frame.LonCPR)
+
+	// Calculate latitude zones
+	AirDlat := 360.0 / 60.0
+	if frame.FFlag == 1 {
+		AirDlat = 360.0 / 59.0
 	}
 
 	// Calculate longitude zones
-	nl0 := app.cprNLTable(rlat0) // NL for even frame
-	nl1 := app.cprNLTable(rlat1) // NL for odd frame
+	j := int(math.Floor(refLat/AirDlat + 0.5))
+	rlat := AirDlat * (float64(j) + lat/CPR_MAX)
 
-	// Check if NL values are compatible
-	if nl0 != nl1 {
-		if app.verbose {
-			app.logger.Debugf("CPR: NL mismatch, nl0=%d, nl1=%d, using single frame", nl0, nl1)
-		}
-		// Fall back to single frame decoding
-		if evenFrame.Timestamp.After(oddFrame.Timestamp) {
-			return app.decodeCPRSingleFrame(evenFrame)
-		} else {
-			return app.decodeCPRSingleFrame(oddFrame)
-		}
+	// Check if we need to adjust the latitude zone
+	if (rlat - refLat) > (AirDlat / 2.0) {
+		rlat -= AirDlat
+	} else if (rlat - refLat) < -(AirDlat / 2.0) {
+		rlat += AirDlat
 	}
 
-	nl := nl0
-	if nl < 1 {
+	// Calculate longitude
+	ni := app.cprNFunction(rlat, int(frame.FFlag))
+	if ni <= 0 {
+		ni = 1
+	}
+
+	dlon := 360.0 / float64(ni)
+	m := int(math.Floor(refLon/dlon + 0.5))
+	rlon := dlon * (float64(m) + lon/CPR_MAX)
+
+	// Check if we need to adjust the longitude zone
+	if (rlon - refLon) > (dlon / 2.0) {
+		rlon -= dlon
+	} else if (rlon - refLon) < -(dlon / 2.0) {
+		rlon += dlon
+	}
+
+	// Normalize longitude to -180 .. +180
+	rlon -= math.Floor((rlon+180)/360) * 360
+
+	// Validate the result
+	if rlat < -90 || rlat > 90 {
+		if app.verbose {
+			app.logger.Debugf("Single frame CPR: invalid latitude %.6f", rlat)
+		}
 		return 0, 0
 	}
 
-	// Calculate longitude index
-	m := int(math.Floor(float64(nl)*lon0 - float64(nl-1)*lon1 + 0.5))
-
-	// Calculate longitude
-	dlon0 := 360.0 / float64(nl)
-	dlon1 := 360.0 / float64(nl-1)
-
-	rlon0 := dlon0 * (float64(m%nl) + lon0)     // Even frame longitude
-	rlon1 := dlon1 * (float64(m%(nl-1)) + lon1) // Odd frame longitude
-
-	// Use the most recent frame's longitude
-	var lon float64
-	if evenFrame.Timestamp.After(oddFrame.Timestamp) {
-		lon = rlon0
-	} else {
-		lon = rlon1
-	}
-
-	// Normalize longitude to -180 to +180
-	for lon > 180 {
-		lon -= 360
-	}
-	for lon < -180 {
-		lon += 360
-	}
-
 	if app.verbose {
-		app.logger.Debugf("Both frames CPR: lat=%.6f, lon=%.6f, j=%d, m=%d, nl=%d", lat, lon, j, m, nl)
+		app.logger.Debugf("Single frame CPR: lat=%.6f, lon=%.6f (ref: %.6f, %.6f)", rlat, rlon, refLat, refLon)
 	}
 
-	return lat, lon
-}
-
-// decodeCPRSingleFrame decodes position using a single frame (less accurate)
-func (app *Application) decodeCPRSingleFrame(frame *CPRFrame) (float64, float64) {
-	latCPRf := float64(frame.LatCPR) / CPR_LAT_MAX
-	lonCPRf := float64(frame.LonCPR) / CPR_LON_MAX
-
-	const nz = 15.0
-	dlat0 := 360.0 / (4.0 * nz)     // 6.0 degrees for even frame
-	dlat1 := 360.0 / (4.0*nz - 1.0) // ~6.101 degrees for odd frame
-
-	var lat float64
-	if frame.FFlag == 0 {
-		// Even frame
-		lat = dlat0 * latCPRf
-	} else {
-		// Odd frame
-		lat = dlat1 * latCPRf
-	}
-
-	// Calculate longitude zones based on latitude
-	nl := app.cprNLTable(lat)
-	var dlon float64
-
-	if frame.FFlag == 0 {
-		// Even frame
-		if nl > 0 {
-			dlon = 360.0 / float64(nl)
-		} else {
-			dlon = 360.0
-		}
-	} else {
-		// Odd frame
-		if nl > 1 {
-			dlon = 360.0 / float64(nl-1)
-		} else {
-			dlon = 360.0
-		}
-	}
-
-	lon := dlon * lonCPRf
-
-	// Normalize longitude to -180 to +180
-	if lon > 180 {
-		lon -= 360
-	}
-
-	// For single frame, we need to make an educated guess about the zone
-	// Try different zone combinations to find a reasonable position
-	// Start with the most likely zones based on the raw coordinates
-
-	// Calculate the most likely zone based on the raw position (for future use)
-	_ = int(math.Floor(lat / dlat0))
-	_ = int(math.Floor(lon / dlon))
-
-	// Try the most likely zone first, then nearby zones
-	zonesToTry := []int{-2, -1, 0, 1, 2}
-
-	for _, latOffset := range zonesToTry {
-		for _, lonOffset := range zonesToTry {
-			testLat := lat + float64(latOffset)*dlat0
-			testLon := lon + float64(lonOffset)*dlon
-
-			// Normalize longitude
-			if testLon > 180 {
-				testLon -= 360
-			} else if testLon < -180 {
-				testLon += 360
-			}
-
-			// Check if this position is reasonable
-			if testLat >= -90.0 && testLat <= 90.0 && testLon >= -180.0 && testLon <= 180.0 {
-				// For Brazil region, prefer positions in the expected range
-				if testLat >= -35.0 && testLat <= -5.0 && testLon >= -75.0 && testLon <= -30.0 {
-					if app.verbose {
-						app.logger.Debugf("Single frame CPR: found Brazil region position lat=%.6f, lon=%.6f", testLat, testLon)
-					}
-					return testLat, testLon
-				}
-			}
-		}
-	}
-
-	// If no Brazil region position found, return the most reasonable position
-	// Try to find any position that's not obviously wrong
-	for _, latOffset := range zonesToTry {
-		for _, lonOffset := range zonesToTry {
-			testLat := lat + float64(latOffset)*dlat0
-			testLon := lon + float64(lonOffset)*dlon
-
-			// Normalize longitude
-			if testLon > 180 {
-				testLon -= 360
-			} else if testLon < -180 {
-				testLon += 360
-			}
-
-			// Accept any reasonable position
-			if testLat >= -90.0 && testLat <= 90.0 && testLon >= -180.0 && testLon <= 180.0 {
-				if app.verbose {
-					app.logger.Debugf("Single frame CPR: using fallback position lat=%.6f, lon=%.6f", testLat, testLon)
-				}
-				return testLat, testLon
-			}
-		}
-	}
-
-	// Last resort: return original coordinates
-	if app.verbose {
-		app.logger.Debugf("Single frame CPR: using original coordinates lat=%.6f, lon=%.6f", lat, lon)
-	}
-	return lat, lon
+	return rlat, rlon
 }
 
 // cprNLTable returns the number of longitude zones for a given latitude using lookup table
@@ -1327,6 +1348,125 @@ func (app *Application) cprNLTable(lat float64) int {
 		return 2
 	}
 	return 1
+}
+
+// extractAlertSPI extracts Alert and SPI flags from surveillance messages
+func (app *Application) extractAlertSPI(data []byte) (bool, bool) {
+	if len(data) < 2 {
+		return false, false
+	}
+
+	df := (data[0] >> 3) & 0x1F
+
+	// Alert and SPI are only available in surveillance messages (DF4, DF5, DF20, DF21)
+	if df != 4 && df != 5 && df != 20 && df != 21 {
+		return false, false
+	}
+
+	// Extract FS (Flight Status) field - bits 6-8
+	fs := (data[0] >> 3) & 0x07
+
+	var alert, spi bool
+
+	switch fs {
+	case 2, 3: // Alert conditions
+		alert = true
+	case 4: // Alert + SPI condition
+		alert = true
+		spi = true
+	case 5: // SPI condition
+		spi = true
+	}
+
+	return alert, spi
+}
+
+// extractEmergency extracts emergency status from ADS-B messages
+func (app *Application) extractEmergency(data []byte) string {
+	if len(data) < 11 {
+		return ""
+	}
+
+	df := (data[0] >> 3) & 0x1F
+	if df != 17 && df != 18 {
+		return ""
+	}
+
+	typeCode := (data[4] >> 3) & 0x1F
+
+	// Emergency status is in aircraft status messages (type code 28)
+	if typeCode == 28 {
+		// Extract emergency state from ME field
+		subtype := data[4] & 0x07
+		if subtype == 1 {
+			// Emergency/priority status
+			emergencyState := (data[5] >> 5) & 0x07
+			switch emergencyState {
+			case 1:
+				return "general"
+			case 2:
+				return "lifeguard"
+			case 3:
+				return "minfuel"
+			case 4:
+				return "nordo"
+			case 5:
+				return "unlawful"
+			case 6:
+				return "downed"
+			default:
+				return "reserved"
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractGroundState extracts ground/airborne state with improved accuracy
+func (app *Application) extractGroundState(data []byte) string {
+	if len(data) < 5 {
+		return "0" // Default to airborne
+	}
+
+	df := (data[0] >> 3) & 0x1F
+
+	// For surveillance messages, check VS and FS bits
+	if df == 4 || df == 5 || df == 20 || df == 21 {
+		// VS (Vertical Status) bit - bit 6
+		vs := (data[0] >> 2) & 0x01
+		if vs == 1 {
+			return "1" // On ground
+		}
+
+		// Also check FS (Flight Status)
+		fs := (data[0] >> 3) & 0x07
+		if fs == 1 || fs == 3 {
+			return "1" // On ground
+		}
+	}
+
+	// For extended squitter messages
+	if df == 17 || df == 18 {
+		typeCode := (data[4] >> 3) & 0x1F
+
+		// Surface position messages (type codes 5-8)
+		if typeCode >= 5 && typeCode <= 8 {
+			return "1" // On ground
+		}
+
+		// Check CA (Capability) field for DF17
+		if df == 17 {
+			ca := data[0] & 0x07
+			if ca == 4 {
+				return "1" // Ground vehicle
+			} else if ca == 5 {
+				return "0" // Airborne
+			}
+		}
+	}
+
+	return "0" // Default to airborne
 }
 
 // reportStatistics reports processing statistics periodically
