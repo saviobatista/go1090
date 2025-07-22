@@ -1,4 +1,4 @@
-package main
+package basestation
 
 import (
 	"os"
@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"go1090/internal/beast"
+	"go1090/internal/logging"
 )
 
 func TestBaseStationWriter_WriteMessage(t *testing.T) {
@@ -21,17 +24,17 @@ func TestBaseStationWriter_WriteMessage(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	logRotator, err := NewLogRotator(tmpdir, true, logger)
+	logRotator, err := logging.NewLogRotator(tmpdir, true, logger)
 	if err != nil {
 		t.Fatalf("Failed to create log rotator: %v", err)
 	}
 	defer logRotator.Close()
 
-	writer := NewBaseStationWriter(logRotator, logger)
+	writer := NewWriter(logRotator, logger)
 
 	// Test message
-	message := &BeastMessage{
-		MessageType: BeastModeS,
+	message := &beast.Message{
+		MessageType: beast.ModeS,
 		Timestamp:   time.Date(2023, 1, 1, 12, 0, 0, 0, time.UTC),
 		Signal:      150,
 		Data:        []byte{0x8D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56},
@@ -89,13 +92,13 @@ func TestBaseStationWriter_MultipleModes(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	logRotator, err := NewLogRotator(tmpdir, true, logger)
+	logRotator, err := logging.NewLogRotator(tmpdir, true, logger)
 	if err != nil {
 		t.Fatalf("Failed to create log rotator: %v", err)
 	}
 	defer logRotator.Close()
 
-	writer := NewBaseStationWriter(logRotator, logger)
+	writer := NewWriter(logRotator, logger)
 
 	testCases := []struct {
 		name        string
@@ -104,24 +107,24 @@ func TestBaseStationWriter_MultipleModes(t *testing.T) {
 	}{
 		{
 			name:        "Mode S Short",
-			messageType: BeastModeS,
+			messageType: beast.ModeS,
 			data:        []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 		},
 		{
 			name:        "Mode S Long",
-			messageType: BeastModeSLong,
+			messageType: beast.ModeSLong,
 			data:        []byte{0x8D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56},
 		},
 		{
 			name:        "Mode A/C",
-			messageType: BeastModeAC,
+			messageType: beast.ModeAC,
 			data:        []byte{0x02, 0x34},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			message := &BeastMessage{
+			message := &beast.Message{
 				MessageType: tc.messageType,
 				Timestamp:   time.Now(),
 				Signal:      100,
@@ -146,13 +149,13 @@ func TestBaseStationWriter_ConcurrentWrite(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	logRotator, err := NewLogRotator(tmpdir, true, logger)
+	logRotator, err := logging.NewLogRotator(tmpdir, true, logger)
 	if err != nil {
 		t.Fatalf("Failed to create log rotator: %v", err)
 	}
 	defer logRotator.Close()
 
-	writer := NewBaseStationWriter(logRotator, logger)
+	writer := NewWriter(logRotator, logger)
 
 	// Write messages concurrently
 	numGoroutines := 10
@@ -164,8 +167,8 @@ func TestBaseStationWriter_ConcurrentWrite(t *testing.T) {
 			defer func() { done <- true }()
 
 			for j := 0; j < messagesPerGoroutine; j++ {
-				message := &BeastMessage{
-					MessageType: BeastModeS,
+				message := &beast.Message{
+					MessageType: beast.ModeS,
 					Timestamp:   time.Now(),
 					Signal:      byte(100 + goroutineID),
 					Data:        []byte{0x5D, 0x48, 0x44, byte(goroutineID), byte(j), 0x56, 0x78},
@@ -224,17 +227,17 @@ func TestBaseStationWriter_InvalidMessages(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	logRotator, err := NewLogRotator(tmpdir, true, logger)
+	logRotator, err := logging.NewLogRotator(tmpdir, true, logger)
 	if err != nil {
 		t.Fatalf("Failed to create log rotator: %v", err)
 	}
 	defer logRotator.Close()
 
-	writer := NewBaseStationWriter(logRotator, logger)
+	writer := NewWriter(logRotator, logger)
 
 	testCases := []struct {
 		name    string
-		message *BeastMessage
+		message *beast.Message
 		wantErr bool
 	}{
 		{
@@ -244,8 +247,8 @@ func TestBaseStationWriter_InvalidMessages(t *testing.T) {
 		},
 		{
 			name: "Empty data",
-			message: &BeastMessage{
-				MessageType: BeastModeS,
+			message: &beast.Message{
+				MessageType: beast.ModeS,
 				Timestamp:   time.Now(),
 				Signal:      100,
 				Data:        []byte{},
@@ -254,8 +257,8 @@ func TestBaseStationWriter_InvalidMessages(t *testing.T) {
 		},
 		{
 			name: "Valid message",
-			message: &BeastMessage{
-				MessageType: BeastModeS,
+			message: &beast.Message{
+				MessageType: beast.ModeS,
 				Timestamp:   time.Now(),
 				Signal:      100,
 				Data:        []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
@@ -289,16 +292,16 @@ func BenchmarkBaseStationWriter_WriteMessage(b *testing.B) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	logRotator, err := NewLogRotator(tmpdir, true, logger)
+	logRotator, err := logging.NewLogRotator(tmpdir, true, logger)
 	if err != nil {
 		b.Fatalf("Failed to create log rotator: %v", err)
 	}
 	defer logRotator.Close()
 
-	writer := NewBaseStationWriter(logRotator, logger)
+	writer := NewWriter(logRotator, logger)
 
-	message := &BeastMessage{
-		MessageType: BeastModeS,
+	message := &beast.Message{
+		MessageType: beast.ModeS,
 		Timestamp:   time.Now(),
 		Signal:      150,
 		Data:        []byte{0x8D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56},

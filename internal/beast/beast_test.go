@@ -1,4 +1,4 @@
-package main
+package beast
 
 import (
 	"fmt"
@@ -56,7 +56,7 @@ func TestBeastModeDecoder_ValidMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decoder := NewBeastDecoder(logger)
+			decoder := NewDecoder(logger)
 
 			messages, err := decoder.Decode(tt.input)
 
@@ -81,14 +81,14 @@ func TestBeastModeDecoder_ValidMessages(t *testing.T) {
 				message := messages[0]
 
 				// Check message type
-				if tt.input[1] == BeastModeAC && message.MessageType != BeastModeAC {
-					t.Errorf("MessageType = %v, want %v", message.MessageType, BeastModeAC)
+				if tt.input[1] == ModeAC && message.MessageType != ModeAC {
+					t.Errorf("MessageType = %v, want %v", message.MessageType, ModeAC)
 				}
-				if tt.input[1] == BeastModeS && message.MessageType != BeastModeS {
-					t.Errorf("MessageType = %v, want %v", message.MessageType, BeastModeS)
+				if tt.input[1] == ModeS && message.MessageType != ModeS {
+					t.Errorf("MessageType = %v, want %v", message.MessageType, ModeS)
 				}
-				if tt.input[1] == BeastModeSLong && message.MessageType != BeastModeSLong {
-					t.Errorf("MessageType = %v, want %v", message.MessageType, BeastModeSLong)
+				if tt.input[1] == ModeSLong && message.MessageType != ModeSLong {
+					t.Errorf("MessageType = %v, want %v", message.MessageType, ModeSLong)
 				}
 
 				// Check that timestamp is parsed
@@ -139,7 +139,7 @@ func TestBeastModeDecoder_InvalidMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decoder := NewBeastDecoder(logger)
+			decoder := NewDecoder(logger)
 
 			messages, err := decoder.Decode(tt.input)
 
@@ -159,7 +159,7 @@ func TestBeastModeDecoder_InvalidMessages(t *testing.T) {
 	}
 }
 
-func TestBeastMessage_GetICAO(t *testing.T) {
+func TestMessage_GetICAO(t *testing.T) {
 	tests := []struct {
 		name        string
 		messageType byte
@@ -168,19 +168,19 @@ func TestBeastMessage_GetICAO(t *testing.T) {
 	}{
 		{
 			name:        "Valid ICAO",
-			messageType: BeastModeS,
+			messageType: ModeS,
 			data:        []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 			expected:    0x484412, // ICAO from bytes 1-3
 		},
 		{
 			name:        "Another ICAO",
-			messageType: BeastModeSLong,
+			messageType: ModeSLong,
 			data:        []byte{0x8D, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56},
 			expected:    0xABCDEF,
 		},
 		{
 			name:        "Mode A/C message",
-			messageType: BeastModeAC,
+			messageType: ModeAC,
 			data:        []byte{0x02, 0x34},
 			expected:    0, // Mode A/C doesn't have ICAO
 		},
@@ -188,7 +188,7 @@ func TestBeastMessage_GetICAO(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &BeastMessage{
+			msg := &Message{
 				MessageType: tt.messageType,
 				Data:        tt.data,
 			}
@@ -201,7 +201,7 @@ func TestBeastMessage_GetICAO(t *testing.T) {
 	}
 }
 
-func TestBeastMessage_GetDF(t *testing.T) {
+func TestMessage_GetDF(t *testing.T) {
 	tests := []struct {
 		name        string
 		messageType byte
@@ -210,19 +210,19 @@ func TestBeastMessage_GetDF(t *testing.T) {
 	}{
 		{
 			name:        "DF 11",
-			messageType: BeastModeS,
+			messageType: ModeS,
 			data:        []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 			expected:    11, // DF from first byte upper 5 bits (0x5D >> 3) & 0x1F = 11
 		},
 		{
 			name:        "DF 17",
-			messageType: BeastModeSLong,
+			messageType: ModeSLong,
 			data:        []byte{0x8D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 			expected:    17, // DF from first byte upper 5 bits (0x8D >> 3) & 0x1F = 17
 		},
 		{
 			name:        "Mode A/C message",
-			messageType: BeastModeAC,
+			messageType: ModeAC,
 			data:        []byte{0x02, 0x34},
 			expected:    0, // Mode A/C doesn't have DF
 		},
@@ -230,7 +230,7 @@ func TestBeastMessage_GetDF(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := &BeastMessage{
+			msg := &Message{
 				MessageType: tt.messageType,
 				Data:        tt.data,
 			}
@@ -243,32 +243,32 @@ func TestBeastMessage_GetDF(t *testing.T) {
 	}
 }
 
-func TestBeastMessage_IsValid(t *testing.T) {
+func TestMessage_IsValid(t *testing.T) {
 	tests := []struct {
 		name     string
-		message  *BeastMessage
+		message  *Message
 		expected bool
 	}{
 		{
 			name: "Valid Mode S message",
-			message: &BeastMessage{
-				MessageType: BeastModeS,
+			message: &Message{
+				MessageType: ModeS,
 				Data:        []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 			},
 			expected: true,
 		},
 		{
 			name: "Valid Mode A/C message",
-			message: &BeastMessage{
-				MessageType: BeastModeAC,
+			message: &Message{
+				MessageType: ModeAC,
 				Data:        []byte{0x02, 0x34},
 			},
 			expected: true,
 		},
 		{
 			name: "Empty data",
-			message: &BeastMessage{
-				MessageType: BeastModeS,
+			message: &Message{
+				MessageType: ModeS,
 				Data:        []byte{},
 			},
 			expected: false,
@@ -320,7 +320,7 @@ func TestBeastModeDecoder_ConcurrentSafety(t *testing.T) {
 			}()
 
 			// Each goroutine gets its own decoder to avoid race conditions
-			decoder := NewBeastDecoder(logger)
+			decoder := NewDecoder(logger)
 			_, err := decoder.Decode(messageData)
 			done <- err
 		}()
@@ -338,7 +338,7 @@ func TestBeastModeDecoder_ConcurrentSafety(t *testing.T) {
 func BenchmarkBeastModeDecoder_Decode(b *testing.B) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
-	decoder := NewBeastDecoder(logger)
+	decoder := NewDecoder(logger)
 
 	messageData := []byte{
 		0x1A, 0x32,
@@ -356,8 +356,8 @@ func BenchmarkBeastModeDecoder_Decode(b *testing.B) {
 	}
 }
 
-func BenchmarkBeastMessage_GetICAO(b *testing.B) {
-	msg := &BeastMessage{
+func BenchmarkMessage_GetICAO(b *testing.B) {
+	msg := &Message{
 		Data: []byte{0x5D, 0x48, 0x44, 0x12, 0x34, 0x56, 0x78},
 	}
 

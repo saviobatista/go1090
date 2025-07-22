@@ -351,6 +351,13 @@ jobs:
         
         echo "Building version: $version"
         echo "Building for GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED"
+        
+        # Set build variables
+        build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        git_commit=$(echo ${{ github.sha }} | cut -c1-7)
+        
+        echo "Build time: $build_time"
+        echo "Git commit: $git_commit"
         go env
         
         # CGO build - validate pkg-config can find libraries
@@ -390,21 +397,25 @@ jobs:
           fi
         fi
         
+        # Set build ldflags
+        build_ldflags="-X go1090/internal/app.Version=$version -X go1090/internal/app.BuildTime=$build_time -X go1090/internal/app.GitCommit=$git_commit"
+        
         # Test build with verbose output for debugging
         echo "Testing build with verbose output..."
-        go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+        echo "Build flags: $build_ldflags"
+        go build -x -v -ldflags "$build_ldflags" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} ./cmd/go1090 || {
           echo "Build failed, trying with explicit CGO flags..."
           # Try with explicit CGO flags
-          CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+          CGO_CFLAGS="$CGO_CFLAGS" CGO_LDFLAGS="$CGO_LDFLAGS" go build -x -v -ldflags "$build_ldflags" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} ./cmd/go1090 || {
             echo "Build still failed, trying minimal CGO configuration..."
             # Try with minimal CGO configuration - just ensure libraries are available
             unset CGO_CFLAGS
             unset CGO_LDFLAGS
             export PKG_CONFIG_PATH="$(brew --prefix librtlsdr)/lib/pkgconfig:$(brew --prefix libusb)/lib/pkgconfig"
-            go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} . || {
+            go build -x -v -ldflags "$build_ldflags" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} ./cmd/go1090 || {
               echo "All build attempts failed. Trying with explicit include paths..."
               # Last resort: try with explicit include paths
-              CGO_CFLAGS="-I$(brew --prefix librtlsdr)/include -I$(brew --prefix libusb)/include" CGO_LDFLAGS="-L$(brew --prefix librtlsdr)/lib -L$(brew --prefix libusb)/lib -lrtlsdr -lusb-1.0" go build -x -v -ldflags "-X main.Version=$version" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} .
+              CGO_CFLAGS="-I$(brew --prefix librtlsdr)/include -I$(brew --prefix libusb)/include" CGO_LDFLAGS="-L$(brew --prefix librtlsdr)/lib -L$(brew --prefix libusb)/lib -lrtlsdr -lusb-1.0" go build -x -v -ldflags "$build_ldflags" -o dist/go1090-${{ matrix.os }}-${{ matrix.arch }} ./cmd/go1090
             }
           }
         }
