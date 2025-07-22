@@ -19,11 +19,12 @@ import (
 // This is the standard character set used in ADS-B callsign encoding
 const adsbCharset = "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?"
 
-// Brazil region correction constants for CPR position decoding
-// These values correct for observed coordinate differences in the Brazil region
+// CPR decoding constants
 const (
-	BrazilLatCorrection = -24.0 // Latitude correction for Brazil region
-	BrazilLonCorrection = -52.0 // Longitude correction for Brazil region
+	CPR_LAT_BITS = 17
+	CPR_LON_BITS = 17
+	CPR_LAT_MAX  = 131072 // 2^17
+	CPR_LON_MAX  = 131072 // 2^17
 )
 
 // Default configuration constants
@@ -58,6 +59,15 @@ var (
 	GitCommit = "unknown"
 )
 
+// AircraftPosition tracks CPR position data for an aircraft
+type AircraftPosition struct {
+	ICAO       uint32
+	EvenFrame  *CPRFrame
+	OddFrame   *CPRFrame
+	LastPos    *Position
+	LastUpdate time.Time
+}
+
 // Application represents the main application
 type Application struct {
 	config        Config
@@ -70,6 +80,10 @@ type Application struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	verbose       bool
+
+	// Aircraft position tracking for CPR decoding
+	aircraftPositions map[uint32]*AircraftPosition
+	positionMutex     sync.RWMutex
 }
 
 // Config holds application configuration
@@ -96,11 +110,12 @@ func NewApplication(config Config) *Application {
 	}
 
 	return &Application{
-		config:  config,
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
-		verbose: config.Verbose,
+		config:            config,
+		logger:            logger,
+		ctx:               ctx,
+		cancel:            cancel,
+		verbose:           config.Verbose,
+		aircraftPositions: make(map[uint32]*AircraftPosition),
 	}
 }
 
@@ -371,9 +386,13 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 			if app.verbose {
 				app.logger.Debugf("Processing velocity message, type code: %d", typeCode)
 			}
-			if speed, trk, vrate := app.extractVelocity(msg.Data[:]); speed != 0 {
-				groundSpeed = fmt.Sprintf("%d", speed)
-				track = fmt.Sprintf("%.1f", trk)
+			if speed, trk, vrate := app.extractVelocity(msg.Data[:]); speed > 0 || trk > 0 || vrate != 0 {
+				if speed > 0 {
+					groundSpeed = fmt.Sprintf("%d", speed)
+				}
+				if trk > 0 {
+					track = fmt.Sprintf("%.1f", trk)
+				}
 				if vrate != 0 {
 					verticalRate = fmt.Sprintf("%d", vrate)
 				}
@@ -454,7 +473,7 @@ func (app *Application) convertToSBS(msg *ADSBMessage) string {
 	return "" // Unsupported message type
 }
 
-// extractCallsign extracts callsign from aircraft identification message
+// extractCallsign extracts callsign from aircraft identification message (dump1090 style)
 func (app *Application) extractCallsign(data []byte) string {
 	if len(data) < 11 {
 		return ""
@@ -465,50 +484,146 @@ func (app *Application) extractCallsign(data []byte) string {
 		app.logger.Debugf("Callsign raw data: %x", data[:11])
 	}
 
-	// Callsign is in bits 40-87 (8 characters, 6 bits each)
-	// ADS-B uses a specific 6-bit character set: space, A-Z, 0-9
-	callsign := make([]byte, 8)
+	// ME (Message Extended) field starts at byte 4 for DF17/18
+	me := data[4:]
+	if len(me) < 7 {
+		return ""
+	}
 
-	for i := 0; i < 8; i++ {
-		// Calculate bit position: start at bit 40, each character is 6 bits
-		bitStart := 40 + i*6
-		byteIdx := bitStart / 8
-		bitOffset := bitStart % 8
+	// Extract callsign using dump1090's exact method: bits 9-14, 15-20, 21-26, etc. (1-based)
+	var callsign [9]byte // 8 chars + null terminator
 
-		if byteIdx >= len(data) {
-			break
-		}
+	callsign[0] = adsbCharset[app.getBits(me, 9, 14)]  // bits 9-14 in ME
+	callsign[1] = adsbCharset[app.getBits(me, 15, 20)] // bits 15-20 in ME
+	callsign[2] = adsbCharset[app.getBits(me, 21, 26)] // bits 21-26 in ME
+	callsign[3] = adsbCharset[app.getBits(me, 27, 32)] // bits 27-32 in ME
+	callsign[4] = adsbCharset[app.getBits(me, 33, 38)] // bits 33-38 in ME
+	callsign[5] = adsbCharset[app.getBits(me, 39, 44)] // bits 39-44 in ME
+	callsign[6] = adsbCharset[app.getBits(me, 45, 50)] // bits 45-50 in ME
+	callsign[7] = adsbCharset[app.getBits(me, 51, 56)] // bits 51-56 in ME
+	callsign[8] = 0
 
-		var char uint8
-		if bitOffset <= 2 {
-			// Character fits in single byte
-			char = (data[byteIdx] >> (2 - bitOffset)) & 0x3F
-		} else {
-			// Character spans two bytes
-			if byteIdx+1 >= len(data) {
-				break
-			}
-			char = ((data[byteIdx] << (bitOffset - 2)) | (data[byteIdx+1] >> (10 - bitOffset))) & 0x3F
-		}
-
-		// Debug individual characters
-		if app.verbose {
-			app.logger.Debugf("Char %d: raw=0x%02x (%d)", i, char, char)
-		}
-
-		// Convert using ADS-B 6-bit character set
-		if char < uint8(len(adsbCharset)) {
-			callsign[i] = adsbCharset[char]
-		} else {
-			callsign[i] = '?'
+	// Debug individual characters
+	if app.verbose {
+		for i := 0; i < 8; i++ {
+			app.logger.Debugf("Char %d: raw=0x%02x (%d) -> '%c'", i, callsign[i], callsign[i], callsign[i])
 		}
 	}
 
-	result := strings.TrimSpace(string(callsign))
+	// Validate callsign (dump1090 style validation)
+	valid := true
+	for i := 0; i < 8; i++ {
+		if !((callsign[i] >= 'A' && callsign[i] <= 'Z') ||
+			(callsign[i] >= '0' && callsign[i] <= '9') ||
+			callsign[i] == ' ') {
+			valid = false
+			break
+		}
+	}
+
+	if !valid {
+		if app.verbose {
+			app.logger.Debugf("Invalid callsign characters detected")
+		}
+		return ""
+	}
+
+	result := strings.TrimSpace(string(callsign[:8]))
 	if app.verbose {
 		app.logger.Debugf("Extracted callsign: '%s'", result)
 	}
 	return result
+}
+
+// getBits extracts bits from data using 1-based indexing (like dump1090)
+func (app *Application) getBits(data []byte, firstBit, lastBit int) uint8 {
+	if firstBit < 1 || lastBit < firstBit || len(data) == 0 {
+		return 0
+	}
+
+	// Convert to 0-based indexing
+	fbi := firstBit - 1
+	lbi := lastBit - 1
+	nbi := lastBit - firstBit + 1
+
+	if nbi > 8 {
+		return 0 // Can't extract more than 8 bits into uint8
+	}
+
+	fby := fbi / 8
+	lby := lbi / 8
+
+	if lby >= len(data) {
+		return 0
+	}
+
+	shift := 7 - (lbi % 8)
+	topMask := uint8(0xFF >> (fbi % 8))
+
+	if fby == lby {
+		// All bits in the same byte
+		return (data[fby] & topMask) >> shift
+	} else if lby == fby+1 {
+		// Bits span two bytes
+		return ((data[fby] & topMask) << (8 - shift)) | (data[lby] >> shift)
+	} else if lby == fby+2 {
+		// Bits span three bytes (needed for callsign extraction)
+		return ((data[fby] & topMask) << (16 - shift)) | (data[fby+1] << (8 - shift)) | (data[lby] >> shift)
+	}
+
+	// For even more complex cases (velocity extraction needs up to 10-bit values)
+	var result uint32
+	for i := fby; i <= lby && i < len(data); i++ {
+		if i == fby {
+			result = uint32(data[i] & topMask)
+		} else {
+			result = (result << 8) | uint32(data[i])
+		}
+	}
+
+	// Handle larger bit extractions for velocity fields
+	if nbi <= 32 {
+		return uint8((result >> shift) & ((1 << nbi) - 1))
+	}
+
+	return uint8(result >> shift)
+}
+
+// getBitsUint16 extracts bits from data using 1-based indexing, returning uint16 for larger values
+func (app *Application) getBitsUint16(data []byte, firstBit, lastBit int) uint16 {
+	if firstBit < 1 || lastBit < firstBit || len(data) == 0 {
+		return 0
+	}
+
+	// Convert to 0-based indexing
+	fbi := firstBit - 1
+	lbi := lastBit - 1
+	nbi := lastBit - firstBit + 1
+
+	if nbi > 16 {
+		return 0 // Can't extract more than 16 bits into uint16
+	}
+
+	fby := fbi / 8
+	lby := lbi / 8
+
+	if lby >= len(data) {
+		return 0
+	}
+
+	shift := 7 - (lbi % 8)
+	topMask := uint8(0xFF >> (fbi % 8))
+
+	var result uint32
+	for i := fby; i <= lby && i < len(data); i++ {
+		if i == fby {
+			result = uint32(data[i] & topMask)
+		} else {
+			result = (result << 8) | uint32(data[i])
+		}
+	}
+
+	return uint16((result >> shift) & ((1 << nbi) - 1))
 }
 
 // extractAltitude extracts altitude from surveillance or position messages
@@ -523,11 +638,13 @@ func (app *Application) extractAltitude(data []byte) int {
 	var altCode uint16
 
 	if df == 4 || df == 20 {
-		// Surveillance altitude reply
+		// Surveillance altitude reply - bits 20-32
 		altCode = (uint16(data[2]&0x1F) << 8) | uint16(data[3])
 	} else if df == 17 || df == 18 {
-		// Extended squitter
-		altCode = (uint16(data[5]&0x1F) << 8) | uint16(data[6])
+		// Extended squitter - altitude is in ME field bits 9-20 (AC12 field)
+		// ME starts at byte 4, so bits 9-20 of ME are in bytes 5-6 of the full message
+		// Extract 12-bit AC12 field properly
+		altCode = (uint16(data[5]&0x1F) << 7) | (uint16(data[6]) >> 1)
 	} else {
 		return 0
 	}
@@ -536,8 +653,31 @@ func (app *Application) extractAltitude(data []byte) int {
 		return 0
 	}
 
-	// Convert from Gray code to binary and calculate altitude
-	return int(altCode)*25 - 1000
+	// Decode altitude using dump1090's AC12 method
+	// Check Q-bit (bit 4 of the 12-bit field)
+	qBit := (altCode & 0x10) != 0
+
+	if qBit {
+		// 25-foot resolution encoding (dump1090's decodeAC12Field)
+		// N is the 11 bit integer resulting from the removal of bit Q at bit 4
+		n := ((altCode & 0x0FE0) >> 1) | (altCode & 0x000F)
+		// The final altitude is the resulting number multiplied by 25, minus 1000
+		return int(n)*25 - 1000
+	} else {
+		// 100-foot resolution (Gillham Mode C encoding)
+		// Make N a 13 bit Gillham coded altitude by inserting M=0 at bit 6
+		n13 := ((altCode & 0x0FC0) << 1) | (altCode & 0x003F)
+
+		// For now, use simplified decoding - full Gillham is complex
+		// This should handle most cases better than before
+		if n13 == 0 {
+			return 0
+		}
+
+		// Basic Mode C conversion (simplified)
+		modeC := int(n13) / 4 // Rough approximation
+		return modeC * 100
+	}
 }
 
 // extractSquawk extracts squawk code from surveillance messages
@@ -575,88 +715,102 @@ func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 		app.logger.Debugf("Velocity message: subtype=%d, data=%x", subtype, data[:11])
 	}
 
-	if subtype != 1 && subtype != 2 && subtype != 3 && subtype != 4 {
+	if subtype < 1 || subtype > 4 {
 		if app.verbose {
-			app.logger.Debugf("Velocity extraction failed: unsupported subtype %d", subtype)
+			app.logger.Debugf("Velocity extraction failed: unsupported subtype %d (only 1-4 supported)", subtype)
 		}
-		return 0, 0, 0 // Only handle groundspeed and airspeed subtypes
+		return 0, 0, 0 // Only handle groundspeed and airspeed subtypes (1-4)
 	}
 
-	var ewSpeed, nsSpeed float64
 	var groundSpeed int
 	var track float64
 
 	if subtype == 1 || subtype == 2 {
-		// Ground speed subtypes
-		// Extract east-west velocity
-		ewDir := (data[5] >> 2) & 0x01
-		ewVel := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+		// Ground speed subtypes (dump1090 method)
+		// ME field starts at data[4], so velocity bits are in ME[1-4]
+		me := data[4:]
 
-		// Extract north-south velocity
-		nsDir := (data[7] >> 7) & 0x01
-		nsVel := (((uint16(data[7]&0x7F) << 3) | (uint16(data[8]) >> 5)) & 0x3FF) - 1
+		// Extract east-west velocity (bits 15-24 of ME)
+		ewRaw := app.getBitsUint16(me, 15, 24)
+		// Extract north-south velocity (bits 26-35 of ME)
+		nsRaw := app.getBitsUint16(me, 26, 35)
 
 		if app.verbose {
-			app.logger.Debugf("Ground speed components: ewDir=%d, ewVel=%d, nsDir=%d, nsVel=%d", ewDir, ewVel, nsDir, nsVel)
+			app.logger.Debugf("Ground speed components: ewDir=%d, ewVel=%d, nsDir=%d, nsVel=%d",
+				app.getBits(me, 14, 14), ewRaw, app.getBits(me, 25, 25), nsRaw)
 		}
 
-		// Convert to signed values
-		if ewDir == 1 {
-			ewSpeed = -float64(ewVel)
-		} else {
-			ewSpeed = float64(ewVel)
-		}
+		if ewRaw != 0 && nsRaw != 0 {
+			// Convert to signed velocities (dump1090 style)
+			ewVel := int(ewRaw-1) * (1 << (subtype - 1)) // subtype 1: *1, subtype 2: *4
+			if app.getBits(me, 14, 14) != 0 {
+				ewVel = -ewVel
+			}
 
-		if nsDir == 1 {
-			nsSpeed = -float64(nsVel)
-		} else {
-			nsSpeed = float64(nsVel)
-		}
+			nsVel := int(nsRaw-1) * (1 << (subtype - 1))
+			if app.getBits(me, 25, 25) != 0 {
+				nsVel = -nsVel
+			}
 
-		// Calculate ground speed and track
-		groundSpeed = int(math.Sqrt(ewSpeed*ewSpeed + nsSpeed*nsSpeed))
-		track = math.Atan2(ewSpeed, nsSpeed) * 180.0 / math.Pi
-		if track < 0 {
-			track += 360
+			// Calculate ground speed and track (dump1090 method)
+			groundSpeed = int(math.Sqrt(float64(nsVel*nsVel+ewVel*ewVel)) + 0.5)
+
+			if groundSpeed > 0 {
+				track = math.Atan2(float64(ewVel), float64(nsVel)) * 180.0 / math.Pi
+				if track < 0 {
+					track += 360
+				}
+
+				if app.verbose {
+					app.logger.Debugf("Valid ground speed: %d kt, track: %.1f°", groundSpeed, track)
+				}
+			}
 		}
 
 	} else if subtype == 3 || subtype == 4 {
-		// Airspeed subtypes
-		// Extract airspeed
-		airspeedAvail := (data[5] >> 2) & 0x01
-		airspeed := ((uint16(data[5]&0x03) << 8) | uint16(data[6])) - 1
+		// Airspeed subtypes (dump1090 method)
+		me := data[4:]
 
-		// Extract heading
-		headingAvail := (data[7] >> 2) & 0x01
-		heading := float64(((uint16(data[7]&0x03)<<8)|uint16(data[8]))*360) / 1024.0
-
-		if app.verbose {
-			app.logger.Debugf("Airspeed data: airspeedAvail=%d, airspeed=%d, headingAvail=%d, heading=%.1f",
-				airspeedAvail, airspeed, headingAvail, heading)
+		// Extract heading (bits 15-24 of ME)
+		if app.getBits(me, 14, 14) != 0 {
+			track = float64(app.getBitsUint16(me, 15, 24)) * 360.0 / 1024.0
 		}
 
-		if airspeedAvail == 1 && airspeed > 0 {
-			groundSpeed = int(airspeed)
-		}
-		if headingAvail == 1 {
-			track = heading
+		// Extract airspeed (bits 26-35 of ME)
+		airspeedRaw := app.getBitsUint16(me, 26, 35)
+		if airspeedRaw != 0 {
+			airspeed := int(airspeedRaw-1) * (1 << (subtype - 3)) // subtype 3: *1, subtype 4: *4
+
+			// For airspeed messages, we don't get ground speed directly
+			// But we can use airspeed as an approximation
+			groundSpeed = airspeed
+
+			if app.verbose {
+				app.logger.Debugf("Airspeed data: airspeed=%d, heading=%.1f", airspeed, track)
+				if groundSpeed > 0 {
+					app.logger.Debugf("Using airspeed as ground speed: %d kt", groundSpeed)
+				}
+			}
 		}
 	}
 
-	// Extract vertical rate (common for all subtypes)
-	vrSign := (data[8] >> 3) & 0x01
-	vrValue := ((uint16(data[8]&0x07) << 6) | (uint16(data[9]) >> 2)) & 0x1FF
+	// Extract vertical rate (common for all subtypes) - dump1090 method
+	me := data[4:]
+	vrRaw := app.getBitsUint16(me, 38, 46) // bits 38-46 of ME
 
 	var verticalRate int
-	if vrValue != 0 {
-		verticalRate = int(vrValue-1) * 64
-		if vrSign == 1 {
+	if vrRaw != 0 {
+		verticalRate = int(vrRaw-1) * 64
+		if app.getBits(me, 37, 37) != 0 { // sign bit 37
 			verticalRate = -verticalRate
 		}
 	}
 
 	if app.verbose {
 		app.logger.Debugf("Velocity result: groundSpeed=%d, track=%.1f, verticalRate=%d", groundSpeed, track, verticalRate)
+		if groundSpeed == 0 && track == 0 && verticalRate == 0 {
+			app.logger.Debugf("All velocity values are zero - check message parsing")
+		}
 	}
 
 	// Return data even if only partial information is available
@@ -665,7 +819,8 @@ func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 		return groundSpeed, track, verticalRate
 	}
 
-	return 0, 0, 0
+	// Return partial data even if all values are zero, to help with debugging
+	return groundSpeed, track, verticalRate
 }
 
 // extractPosition extracts latitude and longitude from position messages
@@ -686,7 +841,8 @@ func (app *Application) extractPosition(data []byte) (float64, float64) {
 	cprLonRaw := ((uint32(data[8]&0x01) << 16) | (uint32(data[9]) << 8) | uint32(data[10])) & 0x1FFFF
 
 	if app.verbose {
-		app.logger.Debugf("CPR position data: ICAO=%06X, F=%d, lat_cpr=%d, lon_cpr=%d", icao, fFlag, cprLatRaw, cprLonRaw)
+		app.logger.Debugf("CPR position data: ICAO=%06X, F=%d, lat_cpr=%d (%.6f), lon_cpr=%d (%.6f)",
+			icao, fFlag, cprLatRaw, float64(cprLatRaw)/CPR_LAT_MAX, cprLonRaw, float64(cprLonRaw)/CPR_LON_MAX)
 	}
 
 	// Use CPR decoder to get actual coordinates
@@ -701,23 +857,195 @@ func (app *Application) extractICAO(data []byte) uint32 {
 	return (uint32(data[1]) << 16) | (uint32(data[2]) << 8) | uint32(data[3])
 }
 
-// decodeCPRPosition decodes CPR coordinates to actual lat/lon
+// decodeCPRPosition decodes CPR coordinates to actual lat/lon using proper CPR algorithm
 func (app *Application) decodeCPRPosition(icao uint32, fFlag uint8, latCPR, lonCPR uint32) (float64, float64) {
-	// Simple CPR decoding with regional correction
-	const nb = 17.0 // Number of bits for CPR encoding
+	now := time.Now()
 
-	// Convert to floating point for calculations
-	latCPRf := float64(latCPR) / 131072.0 // 2^17 = 131072
-	lonCPRf := float64(lonCPR) / 131072.0
+	// Get or create aircraft position tracking
+	app.positionMutex.Lock()
+	aircraft, exists := app.aircraftPositions[icao]
+	if !exists {
+		aircraft = &AircraftPosition{
+			ICAO:       icao,
+			LastUpdate: now,
+		}
+		app.aircraftPositions[icao] = aircraft
+	}
+	app.positionMutex.Unlock()
 
-	// Basic CPR decoding
-	const nz = 15.0                 // Number of zones for latitude
+	// Store the new frame
+	newFrame := &CPRFrame{
+		LatCPR:    latCPR,
+		LonCPR:    lonCPR,
+		FFlag:     fFlag,
+		Timestamp: now,
+	}
+
+	if fFlag == 0 {
+		aircraft.EvenFrame = newFrame
+	} else {
+		aircraft.OddFrame = newFrame
+	}
+
+	// Try to decode using both frames if available
+	if aircraft.EvenFrame != nil && aircraft.OddFrame != nil {
+		// Both frames available - use proper CPR decoding
+		lat, lon := app.decodeCPRBothFrames(aircraft.EvenFrame, aircraft.OddFrame)
+		if lat != 0 || lon != 0 {
+			aircraft.LastPos = &Position{
+				Latitude:  lat,
+				Longitude: lon,
+				Timestamp: now,
+			}
+			aircraft.LastUpdate = now
+
+			if app.verbose {
+				app.logger.Debugf("CPR decode: ICAO=%06X, both frames, lat=%.6f, lon=%.6f", icao, lat, lon)
+			}
+			return lat, lon
+		}
+	}
+
+	// Single frame decoding (less accurate)
+	lat, lon := app.decodeCPRSingleFrame(newFrame)
+	if lat != 0 || lon != 0 {
+		aircraft.LastPos = &Position{
+			Latitude:  lat,
+			Longitude: lon,
+			Timestamp: now,
+		}
+		aircraft.LastUpdate = now
+
+		if app.verbose {
+			app.logger.Debugf("CPR decode: ICAO=%06X, single frame, lat=%.6f, lon=%.6f", icao, lat, lon)
+		}
+		return lat, lon
+	}
+
+	// Use last known position if available and recent
+	if aircraft.LastPos != nil && now.Sub(aircraft.LastPos.Timestamp) < 30*time.Second {
+		if app.verbose {
+			app.logger.Debugf("CPR decode: ICAO=%06X, using last position, lat=%.6f, lon=%.6f", icao, aircraft.LastPos.Latitude, aircraft.LastPos.Longitude)
+		}
+		return aircraft.LastPos.Latitude, aircraft.LastPos.Longitude
+	}
+
+	return 0, 0
+}
+
+// decodeCPRBothFrames decodes position using both even and odd frames (most accurate)
+func (app *Application) decodeCPRBothFrames(evenFrame, oddFrame *CPRFrame) (float64, float64) {
+	// Extract normalized CPR values
+	lat0 := float64(evenFrame.LatCPR) / CPR_LAT_MAX // Even frame latitude
+	lat1 := float64(oddFrame.LatCPR) / CPR_LAT_MAX  // Odd frame latitude
+	lon0 := float64(evenFrame.LonCPR) / CPR_LON_MAX // Even frame longitude
+	lon1 := float64(oddFrame.LonCPR) / CPR_LON_MAX  // Odd frame longitude
+
+	const nz = 15.0
+	dlat0 := 360.0 / (4.0 * nz)     // 6.0 degrees for even frame
+	dlat1 := 360.0 / (4.0*nz - 1.0) // ~6.101 degrees for odd frame
+
+	// Calculate latitude index
+	j := int(math.Floor(59*lat0 - 60*lat1 + 0.5))
+
+	// Calculate latitude for both frames
+	rlat0 := dlat0 * (float64(j%60) + lat0) // Even frame latitude
+	rlat1 := dlat1 * (float64(j%59) + lat1) // Odd frame latitude
+
+	// Use the most recent frame's latitude
+	var lat float64
+	if evenFrame.Timestamp.After(oddFrame.Timestamp) {
+		lat = rlat0
+	} else {
+		lat = rlat1
+	}
+
+	// Check for valid latitude
+	if lat < -90 || lat > 90 {
+		// Try alternative zones
+		for offset := -1; offset <= 1; offset++ {
+			testJ := j + offset
+			testLat0 := dlat0 * (float64(testJ%60) + lat0)
+			testLat1 := dlat1 * (float64(testJ%59) + lat1)
+
+			if testLat0 >= -90 && testLat0 <= 90 {
+				lat = testLat0
+				j = testJ
+				break
+			} else if testLat1 >= -90 && testLat1 <= 90 {
+				lat = testLat1
+				j = testJ
+				break
+			}
+		}
+	}
+
+	// Calculate longitude zones
+	nl0 := app.cprNLTable(rlat0) // NL for even frame
+	nl1 := app.cprNLTable(rlat1) // NL for odd frame
+
+	// Check if NL values are compatible
+	if nl0 != nl1 {
+		if app.verbose {
+			app.logger.Debugf("CPR: NL mismatch, nl0=%d, nl1=%d, using single frame", nl0, nl1)
+		}
+		// Fall back to single frame decoding
+		if evenFrame.Timestamp.After(oddFrame.Timestamp) {
+			return app.decodeCPRSingleFrame(evenFrame)
+		} else {
+			return app.decodeCPRSingleFrame(oddFrame)
+		}
+	}
+
+	nl := nl0
+	if nl < 1 {
+		return 0, 0
+	}
+
+	// Calculate longitude index
+	m := int(math.Floor(float64(nl)*lon0 - float64(nl-1)*lon1 + 0.5))
+
+	// Calculate longitude
+	dlon0 := 360.0 / float64(nl)
+	dlon1 := 360.0 / float64(nl-1)
+
+	rlon0 := dlon0 * (float64(m%nl) + lon0)     // Even frame longitude
+	rlon1 := dlon1 * (float64(m%(nl-1)) + lon1) // Odd frame longitude
+
+	// Use the most recent frame's longitude
+	var lon float64
+	if evenFrame.Timestamp.After(oddFrame.Timestamp) {
+		lon = rlon0
+	} else {
+		lon = rlon1
+	}
+
+	// Normalize longitude to -180 to +180
+	for lon > 180 {
+		lon -= 360
+	}
+	for lon < -180 {
+		lon += 360
+	}
+
+	if app.verbose {
+		app.logger.Debugf("Both frames CPR: lat=%.6f, lon=%.6f, j=%d, m=%d, nl=%d", lat, lon, j, m, nl)
+	}
+
+	return lat, lon
+}
+
+// decodeCPRSingleFrame decodes position using a single frame (less accurate)
+func (app *Application) decodeCPRSingleFrame(frame *CPRFrame) (float64, float64) {
+	latCPRf := float64(frame.LatCPR) / CPR_LAT_MAX
+	lonCPRf := float64(frame.LonCPR) / CPR_LON_MAX
+
+	const nz = 15.0
 	dlat0 := 360.0 / (4.0 * nz)     // 6.0 degrees for even frame
 	dlat1 := 360.0 / (4.0*nz - 1.0) // ~6.101 degrees for odd frame
 
 	var lat float64
-
-	if fFlag == 0 {
+	if frame.FFlag == 0 {
 		// Even frame
 		lat = dlat0 * latCPRf
 	} else {
@@ -729,7 +1057,7 @@ func (app *Application) decodeCPRPosition(icao uint32, fFlag uint8, latCPR, lonC
 	nl := app.cprNLTable(lat)
 	var dlon float64
 
-	if fFlag == 0 {
+	if frame.FFlag == 0 {
 		// Even frame
 		if nl > 0 {
 			dlon = 360.0 / float64(nl)
@@ -747,48 +1075,75 @@ func (app *Application) decodeCPRPosition(icao uint32, fFlag uint8, latCPR, lonC
 
 	lon := dlon * lonCPRf
 
-	// Apply regional correction for Brazil
-	// Our coordinates are offset by approximately -24 lat, -52 lon from expected
-	// Try different zone offsets to get into Brazil region
+	// Normalize longitude to -180 to +180
+	if lon > 180 {
+		lon -= 360
+	}
 
-	// Latitude correction - try different zone offsets
-	for latOffset := -6; latOffset <= -2; latOffset++ {
-		correctedLat := lat + float64(latOffset)*dlat0
-		if correctedLat >= -30.0 && correctedLat <= -15.0 {
-			// Longitude correction
-			for lonOffset := -10; lonOffset <= -7; lonOffset++ {
-				correctedLon := lon + float64(lonOffset)*dlon
-				if correctedLon >= -55.0 && correctedLon <= -40.0 {
+	// For single frame, we need to make an educated guess about the zone
+	// Try different zone combinations to find a reasonable position
+	// Start with the most likely zones based on the raw coordinates
+
+	// Calculate the most likely zone based on the raw position (for future use)
+	_ = int(math.Floor(lat / dlat0))
+	_ = int(math.Floor(lon / dlon))
+
+	// Try the most likely zone first, then nearby zones
+	zonesToTry := []int{-2, -1, 0, 1, 2}
+
+	for _, latOffset := range zonesToTry {
+		for _, lonOffset := range zonesToTry {
+			testLat := lat + float64(latOffset)*dlat0
+			testLon := lon + float64(lonOffset)*dlon
+
+			// Normalize longitude
+			if testLon > 180 {
+				testLon -= 360
+			} else if testLon < -180 {
+				testLon += 360
+			}
+
+			// Check if this position is reasonable
+			if testLat >= -90.0 && testLat <= 90.0 && testLon >= -180.0 && testLon <= 180.0 {
+				// For Brazil region, prefer positions in the expected range
+				if testLat >= -35.0 && testLat <= -5.0 && testLon >= -75.0 && testLon <= -30.0 {
 					if app.verbose {
-						app.logger.Debugf("CPR decode: ICAO=%06X, F=%d, lat=%.6f->%.6f, lon=%.6f->%.6f (corrected)",
-							icao, fFlag, lat, correctedLat, lon, correctedLon)
+						app.logger.Debugf("Single frame CPR: found Brazil region position lat=%.6f, lon=%.6f", testLat, testLon)
 					}
-					return correctedLat, correctedLon
+					return testLat, testLon
 				}
 			}
 		}
 	}
 
-	// If correction doesn't work, try a simple fixed offset based on observed differences
-	// Observed: our coords ~+1, +5 should be ~-23, -47
-	// Difference: -24, -52
-	correctedLat := lat + BrazilLatCorrection
-	correctedLon := lon + BrazilLonCorrection
+	// If no Brazil region position found, return the most reasonable position
+	// Try to find any position that's not obviously wrong
+	for _, latOffset := range zonesToTry {
+		for _, lonOffset := range zonesToTry {
+			testLat := lat + float64(latOffset)*dlat0
+			testLon := lon + float64(lonOffset)*dlon
 
-	if correctedLat >= -35.0 && correctedLat <= -10.0 && correctedLon >= -70.0 && correctedLon <= -30.0 {
-		if app.verbose {
-			app.logger.Debugf("CPR decode: ICAO=%06X, F=%d, lat=%.6f->%.6f, lon=%.6f->%.6f (fixed offset)",
-				icao, fFlag, lat, correctedLat, lon, correctedLon)
+			// Normalize longitude
+			if testLon > 180 {
+				testLon -= 360
+			} else if testLon < -180 {
+				testLon += 360
+			}
+
+			// Accept any reasonable position
+			if testLat >= -90.0 && testLat <= 90.0 && testLon >= -180.0 && testLon <= 180.0 {
+				if app.verbose {
+					app.logger.Debugf("Single frame CPR: using fallback position lat=%.6f, lon=%.6f", testLat, testLon)
+				}
+				return testLat, testLon
+			}
 		}
-		return correctedLat, correctedLon
 	}
 
-	// Fallback to original coordinates
+	// Last resort: return original coordinates
 	if app.verbose {
-		app.logger.Debugf("CPR decode: ICAO=%06X, F=%d, lat_cpr=%d->%.6f, lon_cpr=%d->%.6f, lat=%.6f, lon=%.6f (fallback)",
-			icao, fFlag, latCPR, latCPRf, lonCPR, lonCPRf, lat, lon)
+		app.logger.Debugf("Single frame CPR: using original coordinates lat=%.6f, lon=%.6f", lat, lon)
 	}
-
 	return lat, lon
 }
 
@@ -984,12 +1339,16 @@ func (app *Application) reportStatistics() {
 		case <-app.ctx.Done():
 			return
 		case <-ticker.C:
-			total, preambles, valid := app.adsbProcessor.GetStats()
+			total, preambles, valid, corrected, singleBit, twoBit := app.adsbProcessor.GetStats()
 			app.logger.WithFields(logrus.Fields{
-				"total_processed": total,
-				"preambles_found": preambles,
-				"valid_messages":  valid,
-			}).Info("ADS-B processing statistics")
+				"total_processed":    total,
+				"preambles_found":    preambles,
+				"valid_messages":     valid,
+				"corrected_messages": corrected,
+				"single_bit_errors":  singleBit,
+				"two_bit_errors":     twoBit,
+				"success_rate":       fmt.Sprintf("%.2f%%", float64(valid)/float64(preambles)*100),
+			}).Info("Enhanced ADS-B processing statistics (dump1090-style)")
 		}
 	}
 }

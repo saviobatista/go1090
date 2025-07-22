@@ -259,20 +259,29 @@ func TestGetStats(t *testing.T) {
 	processor := NewADSBProcessor(2400000, logrus.New())
 
 	// Initial stats should be zero
-	total, preambles, valid := processor.GetStats()
+	total, preambles, valid, corrected, singleBit, twoBit := processor.GetStats()
 	assert.Equal(t, uint64(0), total)
 	assert.Equal(t, uint64(0), preambles)
 	assert.Equal(t, uint64(0), valid)
+	assert.Equal(t, uint64(0), corrected)
+	assert.Equal(t, uint64(0), singleBit)
+	assert.Equal(t, uint64(0), twoBit)
 
 	// Simulate some processing
 	processor.messageCount = 100
 	processor.preambleCount = 50
 	processor.validMessages = 25
+	processor.correctedMessages = 5
+	processor.singleBitErrors = 3
+	processor.twoBitErrors = 2
 
-	total, preambles, valid = processor.GetStats()
+	total, preambles, valid, corrected, singleBit, twoBit = processor.GetStats()
 	assert.Equal(t, uint64(100), total)
 	assert.Equal(t, uint64(50), preambles)
 	assert.Equal(t, uint64(25), valid)
+	assert.Equal(t, uint64(5), corrected)
+	assert.Equal(t, uint64(3), singleBit)
+	assert.Equal(t, uint64(2), twoBit)
 }
 
 // TestADSBMessage_GetICAO tests the GetICAO method
@@ -514,7 +523,7 @@ func TestConcurrentProcessing(t *testing.T) {
 		go func() {
 			defer func() { done <- true }()
 			for j := 0; j < 100; j++ {
-				processor.GetStats()
+				_, _, _, _, _, _ = processor.GetStats()
 			}
 		}()
 	}
