@@ -816,7 +816,7 @@ func (app *Application) extractVelocity(data []byte) (int, float64, int) {
 				nsVel = -nsVel
 			}
 
-			// Calculate ground speed and track (dump1090 method)
+      // Calculate ground speed and track (dump1090 method)
 			groundSpeed = int(math.Sqrt(float64(nsVel*nsVel+ewVel*ewVel)) + 0.5)
 
 			if groundSpeed > 0 {
