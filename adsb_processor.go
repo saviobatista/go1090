@@ -14,7 +14,11 @@ const MODES_GENERATOR_POLY = 0xfff409
 // Pre-computed CRC table for performance optimization
 var crcTable []uint32
 
-// init initializes the pre-computed CRC table
+// Additional CRC tables for error correction (like dump1090)
+var crcErrorSingleBitTable [112]uint32
+var crcErrorTwoBitTable [112 * 112]uint32
+
+// init initializes the pre-computed CRC tables
 func init() {
 	crcTable = make([]uint32, 256)
 	for i := 0; i < 256; i++ {
@@ -28,6 +32,43 @@ func init() {
 		}
 		crcTable[i] = c & 0x00ffffff
 	}
+
+	// Initialize error correction tables (like dump1090)
+	initErrorCorrectionTables()
+}
+
+// initErrorCorrectionTables initializes tables for single and two-bit error correction
+func initErrorCorrectionTables() {
+	// Single bit error table
+	for i := 0; i < 112; i++ {
+		msg := make([]byte, 14)
+		// Set the bit at position i
+		bytePos := i / 8
+		bitPos := 7 - (i % 8)
+		if bytePos < 14 {
+			msg[bytePos] = 1 << bitPos
+		}
+		crcErrorSingleBitTable[i] = calculateCRCRaw(msg[:11])
+	}
+
+	// Two bit error table (simplified version)
+	for i := 0; i < 112; i++ {
+		for j := i + 1; j < 112; j++ {
+			if i*112+j < len(crcErrorTwoBitTable) {
+				msg := make([]byte, 14)
+				// Set bits at positions i and j
+				bytePos1, bitPos1 := i/8, 7-(i%8)
+				bytePos2, bitPos2 := j/8, 7-(j%8)
+				if bytePos1 < 14 {
+					msg[bytePos1] |= 1 << bitPos1
+				}
+				if bytePos2 < 14 {
+					msg[bytePos2] |= 1 << bitPos2
+				}
+				crcErrorTwoBitTable[i*112+j] = calculateCRCRaw(msg[:11])
+			}
+		}
+	}
 }
 
 // ADSBProcessor handles the complete ADS-B processing pipeline using dump1090's approach
@@ -37,10 +78,13 @@ type ADSBProcessor struct {
 	messageCount uint64
 
 	// Statistics
-	preambleCount   uint64
-	validMessages   uint64
-	rejectedBad     uint64
-	rejectedUnknown uint64
+	preambleCount     uint64
+	validMessages     uint64
+	rejectedBad       uint64
+	rejectedUnknown   uint64
+	correctedMessages uint64
+	singleBitErrors   uint64
+	twoBitErrors      uint64
 
 	// Aircraft tracking for CPR decoding
 	aircraft map[uint32]*AircraftState
@@ -49,13 +93,15 @@ type ADSBProcessor struct {
 
 // ADSBMessage represents a decoded ADS-B message
 type ADSBMessage struct {
-	Data      [14]byte // 112 bits = 14 bytes
-	Timestamp time.Time
-	Signal    float64
-	CRC       uint32
-	Valid     bool
-	Score     int
-	Phase     int
+	Data            [14]byte // 112 bits = 14 bytes
+	Timestamp       time.Time
+	Signal          float64
+	CRC             uint32
+	Valid           bool
+	Score           int
+	Phase           int
+	ErrorsCorrected int    // Number of bit errors corrected
+	CRCType         string // "valid", "corrected-1", "corrected-2", "invalid"
 }
 
 // AircraftState tracks position data for CPR decoding
@@ -71,6 +117,7 @@ type AircraftState struct {
 type CPRFrame struct {
 	LatCPR    uint32
 	LonCPR    uint32
+	FFlag     uint8
 	Timestamp time.Time
 }
 
@@ -78,6 +125,7 @@ type CPRFrame struct {
 type Position struct {
 	Latitude  float64
 	Longitude float64
+	Timestamp time.Time
 }
 
 // NewADSBProcessor creates a new ADS-B processor
@@ -234,13 +282,10 @@ func (p *ADSBProcessor) tryAllPhases(m []uint16, position int) *ADSBMessage {
 		message.Phase = tryPhase
 		message.Timestamp = time.Now()
 
-		// Calculate CRC and validate
-		calculatedCRC := p.calculateCRC(message.Data[:11])
-		messageCRC := uint32(message.Data[11])<<16 | uint32(message.Data[12])<<8 | uint32(message.Data[13])
-		message.CRC = calculatedCRC
-		message.Valid = calculatedCRC == messageCRC
+		// Enhanced CRC validation with error correction (like dump1090)
+		p.validateAndCorrectMessage(message)
 
-		// Score the message (simplified version of dump1090's scoring)
+		// Score the message (dump1090-style scoring)
 		score := p.scoreMessage(message)
 		message.Score = score
 
@@ -251,6 +296,114 @@ func (p *ADSBProcessor) tryAllPhases(m []uint16, position int) *ADSBMessage {
 	}
 
 	return bestMessage
+}
+
+// validateAndCorrectMessage performs CRC validation and error correction (dump1090-style)
+func (p *ADSBProcessor) validateAndCorrectMessage(msg *ADSBMessage) {
+	// Get DF (Downlink Format) to determine message validity
+	df := msg.Data[0] >> 3
+
+	// Pre-filter invalid DF codes (dump1090 style)
+	validDF := false
+	switch df {
+	case 0, 4, 5, 11, 16, 17, 18, 20, 21, 24:
+		validDF = true
+	default:
+		validDF = false
+	}
+
+	if !validDF {
+		msg.Valid = false
+		msg.CRCType = "invalid-df"
+		msg.ErrorsCorrected = 0
+		return
+	}
+
+	// Determine message length
+	msgLen := 14 // Long message
+	if df == 0 || df == 4 || df == 5 || df == 11 {
+		msgLen = 7 // Short message
+	}
+
+	// Calculate CRC using dump1090 method
+	crc := calculateCRCRaw(msg.Data[:msgLen])
+	msg.CRC = crc
+
+	// For DF17/18, CRC should be 0
+	// For DF11, CRC should have low 7 bits as 0 (IID field)
+	if df == 17 || df == 18 {
+		if crc == 0 {
+			msg.Valid = true
+			msg.CRCType = "valid"
+			msg.ErrorsCorrected = 0
+			return
+		}
+	} else if df == 11 {
+		if (crc & 0xFFFF80) == 0 {
+			msg.Valid = true
+			msg.CRCType = "valid"
+			msg.ErrorsCorrected = 0
+			return
+		}
+	} else {
+		// For other DF types, accept if CRC is 0
+		if crc == 0 {
+			msg.Valid = true
+			msg.CRCType = "valid"
+			msg.ErrorsCorrected = 0
+			return
+		}
+	}
+
+	// Only try error correction for DF11/17/18
+	if df == 11 || df == 17 || df == 18 {
+		// Try single-bit error correction
+		for i := 0; i < len(crcErrorSingleBitTable); i++ {
+			if crcErrorSingleBitTable[i] == crc {
+				// Found single bit error
+				bytePos := i / 8
+				bitPos := 7 - (i % 8)
+				if bytePos < msgLen {
+					msg.Data[bytePos] ^= 1 << bitPos
+					msg.Valid = true
+					msg.CRCType = "corrected-1"
+					msg.ErrorsCorrected = 1
+					p.singleBitErrors++
+					p.correctedMessages++
+					return
+				}
+			}
+		}
+
+		// Try two-bit error correction (only for DF17/18)
+		if df == 17 || df == 18 {
+			for i := 0; i < 112; i++ {
+				for j := i + 1; j < 112; j++ {
+					if i*112+j < len(crcErrorTwoBitTable) && crcErrorTwoBitTable[i*112+j] == crc {
+						// Found two bit error
+						bytePos1, bitPos1 := i/8, 7-(i%8)
+						bytePos2, bitPos2 := j/8, 7-(j%8)
+
+						if bytePos1 < msgLen && bytePos2 < msgLen {
+							msg.Data[bytePos1] ^= 1 << bitPos1
+							msg.Data[bytePos2] ^= 1 << bitPos2
+							msg.Valid = true
+							msg.CRCType = "corrected-2"
+							msg.ErrorsCorrected = 2
+							p.twoBitErrors++
+							p.correctedMessages++
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// No correction possible
+	msg.Valid = false
+	msg.CRCType = "invalid"
+	msg.ErrorsCorrected = 0
 }
 
 // decodeBitsWithPhase decodes 112 bits using the specified phase
@@ -375,14 +528,24 @@ func (p *ADSBProcessor) bitValue(correlation int) uint8 {
 	return 0
 }
 
-// scoreMessage scores a decoded message (simplified version of dump1090's scoring)
+// scoreMessage scores a decoded message (enhanced dump1090-style scoring)
 func (p *ADSBProcessor) scoreMessage(msg *ADSBMessage) int {
 	if !msg.Valid {
 		return -1 // Invalid CRC
 	}
 
-	// Base score for valid CRC
-	score := 1000
+	// Base score depends on error correction
+	var score int
+	switch msg.CRCType {
+	case "valid":
+		score = 1000 // Perfect CRC
+	case "corrected-1":
+		score = 750 // Single bit error corrected
+	case "corrected-2":
+		score = 500 // Two bit errors corrected
+	default:
+		return -1 // Invalid
+	}
 
 	// Check DF (Downlink Format) validity
 	df := msg.Data[0] >> 3
@@ -391,8 +554,21 @@ func (p *ADSBProcessor) scoreMessage(msg *ADSBMessage) int {
 		// Valid DF codes
 		score += 500
 	default:
-		// Invalid DF
-		return -1
+		// Invalid DF - but don't immediately reject, dump1090 is more permissive
+		score -= 200 // Penalize but don't reject entirely
+	}
+
+	// Additional validation for specific message types
+	if df == 17 || df == 18 {
+		// Extended squitter - check type code validity
+		if len(msg.Data) >= 5 {
+			typeCode := (msg.Data[4] >> 3) & 0x1F
+			if typeCode >= 1 && typeCode <= 31 {
+				score += 100 // Valid type code
+			} else {
+				score -= 50 // Invalid type code but don't reject entirely
+			}
+		}
 	}
 
 	return score
@@ -400,6 +576,11 @@ func (p *ADSBProcessor) scoreMessage(msg *ADSBMessage) int {
 
 // calculateCRC calculates the ADS-B CRC-24 checksum using Mode S standard (from dump1090)
 func (p *ADSBProcessor) calculateCRC(data []byte) uint32 {
+	return calculateCRCRaw(data)
+}
+
+// calculateCRCRaw performs raw CRC calculation
+func calculateCRCRaw(data []byte) uint32 {
 	var rem uint32 = 0
 
 	// Use pre-computed CRC table for better performance
@@ -413,8 +594,8 @@ func (p *ADSBProcessor) calculateCRC(data []byte) uint32 {
 }
 
 // GetStats returns processing statistics
-func (p *ADSBProcessor) GetStats() (uint64, uint64, uint64) {
-	return p.messageCount, p.preambleCount, p.validMessages
+func (p *ADSBProcessor) GetStats() (uint64, uint64, uint64, uint64, uint64, uint64) {
+	return p.messageCount, p.preambleCount, p.validMessages, p.correctedMessages, p.singleBitErrors, p.twoBitErrors
 }
 
 // GetICAO extracts ICAO address from ADS-B message
